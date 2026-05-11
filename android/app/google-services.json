@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "479645879162",
+    "project_id": "myemas-88d0e",
+    "storage_bucket": "myemas-88d0e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:479645879162:android:2877b35bb04636f704e4c3",
+        "android_client_info": {
+          "package_name": "com.example.my_emas"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAdEFEIYIpev1rMGKk2ZqSAFll3sfrEgdk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

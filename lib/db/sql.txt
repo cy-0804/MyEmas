@@ -1,0 +1,157 @@
+-- =========================
+-- EXTENSIONS
+-- =========================
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- =========================
+-- ENUMS
+-- =========================
+CREATE TYPE role_type AS ENUM ('elderly', 'caregiver');
+
+CREATE TYPE medication_status AS ENUM ('taken', 'missed');
+
+CREATE TYPE risk_level_type AS ENUM ('low', 'medium', 'high');
+
+-- =========================
+-- USER TABLE
+-- =========================
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    fullname TEXT,
+    gender TEXT,
+    date_of_birth DATE,
+    address TEXT,
+    email TEXT UNIQUE,
+    icno TEXT,
+    password_hash TEXT,
+    phone_num TEXT,
+    language TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    role_id role_type
+);
+
+-- =========================
+-- ELDERLY
+-- =========================
+CREATE TABLE elderly (
+    user_id UUID PRIMARY KEY,
+    chronic_condition TEXT,
+    mobility_status TEXT,
+    blood_type TEXT,
+    allergies TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- =========================
+-- CAREGIVER
+-- =========================
+CREATE TABLE caregiver (
+    user_id UUID PRIMARY KEY,
+    organization TEXT,
+    availability TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- =========================
+-- CARE LINK
+-- =========================
+CREATE TABLE care_link (
+    link_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    elderly_id UUID,
+    caregiver_id UUID,
+    relationship TEXT,
+    emergency_contact_primary BOOLEAN DEFAULT FALSE,
+    FOREIGN KEY (elderly_id) REFERENCES elderly(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (caregiver_id) REFERENCES caregiver(user_id) ON DELETE CASCADE
+);
+
+-- =========================
+-- HEALTH RECORD
+-- =========================
+CREATE TABLE health_record (
+    record_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    elderly_id UUID,
+    blood_pressure TEXT,
+    heart_rate INT,
+    glucose_level FLOAT,
+    temperature FLOAT,
+    mood TEXT,
+    device_type TEXT,
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (elderly_id) REFERENCES elderly(user_id) ON DELETE CASCADE
+);
+
+-- =========================
+-- HEALTH RISK ASSESSMENT
+-- =========================
+CREATE TABLE health_risk_assessment (
+    risk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    record_id UUID,
+    risk_level risk_level_type,
+    recommendation TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (record_id) REFERENCES health_record(record_id) ON DELETE CASCADE
+);
+
+-- =========================
+-- SCHEDULE
+-- =========================
+CREATE TABLE schedule (
+    schedule_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    elderly_id UUID,
+    title TEXT,
+    schedule_date_time TIMESTAMP,
+    location TEXT,
+    notes TEXT,
+    FOREIGN KEY (elderly_id) REFERENCES elderly(user_id) ON DELETE CASCADE
+);
+
+-- =========================
+-- REMINDER
+-- =========================
+CREATE TABLE reminder (
+    reminder_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    type TEXT,
+    message TEXT,
+    reminder_time TIMESTAMP
+);
+
+-- =========================
+-- MEDICATIONS
+-- =========================
+CREATE TABLE medications (
+    medication_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    medication_name TEXT,
+    dosage TEXT,
+    frequency TEXT,
+    instruction TEXT,
+    medication_stock INT,
+    medical_notes TEXT,
+    schedule_id UUID,
+    FOREIGN KEY (schedule_id) REFERENCES schedule(schedule_id) ON DELETE SET NULL
+);
+
+-- =========================
+-- MEDICATION LOGS
+-- =========================
+CREATE TABLE medication_logs (
+    log_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    medication_id UUID,
+    status medication_status,
+    logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (medication_id) REFERENCES medications(medication_id) ON DELETE CASCADE
+);
+
+-- =========================
+-- EMERGENCY LOGS
+-- =========================
+CREATE TABLE emergency_logs (
+    alert_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    link_id UUID,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TEXT,
+    location TEXT,
+    caregiver_id UUID,
+    FOREIGN KEY (link_id) REFERENCES care_link(link_id) ON DELETE CASCADE,
+    FOREIGN KEY (caregiver_id) REFERENCES caregiver(user_id) ON DELETE SET NULL
+);
