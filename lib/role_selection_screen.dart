@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'basic_info_screen.dart';
+import 'login_screen.dart';
 
 class RoleSelectionScreen extends StatefulWidget {
   const RoleSelectionScreen({super.key});
@@ -41,22 +42,23 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
   Widget _buildRoleCard({
     required String title,
     required String description,
-    required Color color,
-    required IconData icon,
+    required Color titleColor,
+    required String image1,
+    required String image2,
     required VoidCallback? onTap,
   }) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        height: 168,
+        height: 325,
         width: double.infinity,
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.grey.shade300),
+          border: Border.all(color: const Color.fromRGBO(108, 114, 120, 0.36)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.1),
+              color: Colors.black.withOpacity(0.25),
               blurRadius: 4,
               offset: const Offset(0, 4),
             ),
@@ -64,34 +66,51 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
         ),
         child: Stack(
           children: [
-            Positioned(
-              left: 20,
-              top: 38,
-              child: Icon(icon, size: 80, color: color.withOpacity(0.8)),
-            ),
-            Positioned(
-              left: 140,
-              top: 35,
-              child: Text(
-                title,
-                style: TextStyle(
-                  fontSize: 36,
-                  fontWeight: FontWeight.bold,
-                  color: color,
-                ),
-              ),
-            ),
-            Positioned(
-              left: 140,
-              top: 84,
-              right: 16,
-              child: Text(
-                description,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey.shade700,
-                  fontWeight: FontWeight.w600,
-                ),
+            Padding(
+              padding: const EdgeInsets.only(top: 20.0, bottom: 9.0),
+              child: Column(
+                children: [
+                  // Images row
+                  SizedBox(
+                    height: 158,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Expanded(child: Image.asset(image1, fit: BoxFit.contain)),
+                        const SizedBox(width: 8),
+                        Expanded(child: Image.asset(image2, fit: BoxFit.contain)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Title
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontFamily: 'League Spartan',
+                      fontSize: 40,
+                      fontWeight: FontWeight.w600,
+                      color: titleColor,
+                      height: 1.4,
+                    ),
+                  ),
+                  // Description
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: Text(
+                      description,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontFamily: 'Open Sans',
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF47494A),
+                        height: 1.37,
+                        letterSpacing: 1.12,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
             if (onTap == null)
@@ -125,17 +144,25 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.black87),
-          onPressed: () => Navigator.pop(context),
+          onPressed: () async {
+            await Supabase.instance.client.auth.signOut();
+            if (context.mounted) {
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+                (route) => false,
+              );
+            }
+          },
         ),
       ),
       body: SafeArea(
         child: _isLoading
             ? const Center(child: CircularProgressIndicator(color: Color(0xFF51A77B)))
-            : Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24.0),
+            : SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
                 child: Column(
                   children: [
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 8),
                     const Text(
                       'Select Your Role',
                       style: TextStyle(
@@ -149,18 +176,21 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                     _buildRoleCard(
                       title: 'Elderly',
                       description: 'Simple interface, voice commands, and health tracking tools.',
-                      color: const Color(0xFF3F8863),
-                      icon: Icons.elderly,
+                      titleColor: const Color(0xFF3F8863),
+                      image1: 'senior.png',
+                      image2: 'senior (1).png',
                       onTap: () => _selectRole('elderly'),
                     ),
                     const SizedBox(height: 30),
                     _buildRoleCard(
                       title: 'Caregiver',
                       description: 'Remote monitoring, alert management, and caregiver support.',
-                      color: const Color(0xFF00539E),
-                      icon: Icons.health_and_safety,
-                      onTap: null, // Blocked as requested
+                      titleColor: const Color(0xFF00539E),
+                      image1: 'caregiver.png',
+                      image2: 'caregiver (1).png',
+                      onTap: null, // Coming soon
                     ),
+                    const SizedBox(height: 40),
                   ],
                 ),
               ),

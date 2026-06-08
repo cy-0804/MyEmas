@@ -24,20 +24,29 @@ class HealthInfoIntroScreen extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               const Spacer(),
-              // Placeholder for the illustration
-              Container(
-                width: 280,
-                height: 280,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade100,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.favorite, size: 100, color: Color(0xFF51A77B)),
+              // Illustration
+              Image.asset(
+                'health-report.png',
+                width: 250,
+                height: 250,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    width: 250,
+                    height: 250,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.person_outline, size: 100, color: Color(0xFF51A77B)),
+                  );
+                },
               ),
               const SizedBox(height: 40),
               const Text(
-                'Set Up Your Profile',
+                'Set up your Profile',
                 style: TextStyle(
+                  fontFamily: 'League Spartan',
                   fontSize: 36,
                   fontWeight: FontWeight.w900,
                   color: Color(0xFF27252E),
@@ -47,34 +56,38 @@ class HealthInfoIntroScreen extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 40.0),
                 child: Text(
-                  'Set up your profile to enhance your experience',
+                  'We need more information about you',
                   textAlign: TextAlign.center,
                   style: TextStyle(
+                    fontFamily: 'Open Sans',
                     fontSize: 16,
-                    color: Colors.black87,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF47494A),
                   ),
                 ),
               ),
               const Spacer(),
-              SizedBox(
-                width: 280,
-                height: 56,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const HealthInfoScreen()),
-                    );
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF51A77B),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    elevation: 5,
-                    shadowColor: const Color(0xFF51A77B).withOpacity(0.3),
-                  ),
-                  child: const Text(
-                    'Get Started',
-                    style: TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const HealthInfoScreen()),
+                      );
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF51A77B),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      elevation: 0,
+                    ),
+                    child: const Text(
+                      'Set Up',
+                      style: TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold),
+                    ),
                   ),
                 ),
               ),

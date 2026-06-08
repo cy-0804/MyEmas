@@ -1,11 +1,13 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'role_selection_screen.dart';
+import 'account_created_screen.dart';
 
 class VerificationScreen extends StatefulWidget {
   final bool isEmail;
-  final String contact; // The email address or phone number
-  final String password; // Passed to login or insert into DB if needed
+  final String contact;
+  final String password;
 
   const VerificationScreen({
     super.key,
@@ -19,28 +21,77 @@ class VerificationScreen extends StatefulWidget {
 }
 
 class _VerificationScreenState extends State<VerificationScreen> {
-  final List<TextEditingController> _controllers = List.generate(8, (_) => TextEditingController());
-  final List<FocusNode> _focusNodes = List.generate(8, (_) => FocusNode());
+  // 6 OTP boxes (Figma shows 6-8; Supabase email OTP is 6 digits)
+  static const int _otpLength = 6;
+  final List<TextEditingController> _controllers =
+      List.generate(_otpLength, (_) => TextEditingController());
+  final List<FocusNode> _focusNodes = List.generate(_otpLength, (_) => FocusNode());
+
   bool _isLoading = false;
+  bool _canResend = false;
+  int _secondsLeft = 30;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _startCountdown();
+  }
+
+  void _startCountdown() {
+    setState(() {
+      _canResend = false;
+      _secondsLeft = 30;
+    });
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_secondsLeft <= 1) {
+        timer.cancel();
+        if (mounted) setState(() => _canResend = true);
+      } else {
+        if (mounted) setState(() => _secondsLeft--);
+      }
+    });
+  }
 
   @override
   void dispose() {
-    for (var controller in _controllers) {
-      controller.dispose();
+    _timer?.cancel();
+    for (final c in _controllers) {
+      c.dispose();
     }
-    for (var node in _focusNodes) {
-      node.dispose();
+    for (final f in _focusNodes) {
+      f.dispose();
     }
     super.dispose();
   }
 
-  Future<void> _verifyOTP() async {
-    final code = _controllers.map((c) => c.text).join();
-    if (code.length < 8) return;
+  String get _otp => _controllers.map((c) => c.text).join();
 
-    setState(() {
-      _isLoading = true;
-    });
+  void _onChanged(String value, int index) {
+    if (value.isNotEmpty) {
+      if (index < _otpLength - 1) {
+        FocusScope.of(context).requestFocus(_focusNodes[index + 1]);
+      } else {
+        _focusNodes[index].unfocus();
+        // Auto-verify when all digits are entered
+        if (_otp.length == _otpLength) _verifyOTP();
+      }
+    } else {
+      if (index > 0) {
+        FocusScope.of(context).requestFocus(_focusNodes[index - 1]);
+      }
+    }
+  }
+
+  Future<void> _verifyOTP() async {
+    final code = _otp;
+    if (code.length < _otpLength) {
+      _showSnack('Please enter the complete verification code');
+      return;
+    }
+
+    setState(() => _isLoading = true);
 
     try {
       if (widget.isEmail) {
@@ -63,73 +114,70 @@ class _VerificationScreenState extends State<VerificationScreen> {
         }
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showSnack('Invalid code. Please try again.');
     } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _insertIntoDatabase(String userId) async {
     try {
-      // Insert into public.users
       final data = <String, dynamic>{
-        'user_id': userId, // Both Email and Phone Auth from Supabase return valid UUIDs!
+        'user_id': userId,
         'email': widget.isEmail ? widget.contact : null,
         'phone_num': widget.isEmail ? null : widget.contact,
-        // other fields like fullname can be updated later in profile creation
       };
-
-      // Ensure we don't insert null values as 'null' strings
       data.removeWhere((key, value) => value == null);
-
       await Supabase.instance.client.from('users').insert(data);
-      
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account Created Successfully!')));
-        Navigator.push(
+        Navigator.pushAndRemoveUntil(
           context,
-          MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
+          MaterialPageRoute(builder: (_) => const AccountCreatedScreen()),
+          (route) => false,
         );
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("DB Error: ${e.toString()}")));
-      }
+      if (mounted) _showSnack('Error: ${e.toString()}');
     }
   }
 
-  void _onChanged(String value, int index) {
-    if (value.isNotEmpty) {
-      if (index < 7) {
-        FocusScope.of(context).requestFocus(_focusNodes[index + 1]);
+  Future<void> _resendCode() async {
+    if (!_canResend) return;
+    setState(() => _canResend = false); // prevent double-tap
+    try {
+      if (widget.isEmail) {
+        await Supabase.instance.client.auth.resend(
+          type: OtpType.signup,
+          email: widget.contact,
+        );
       } else {
-        _focusNodes[index].unfocus();
-        _verifyOTP(); // Automatically verify when the last digit is entered
+        await Supabase.instance.client.auth.resend(
+          type: OtpType.sms,
+          phone: widget.contact,
+        );
       }
-    } else {
-      if (index > 0) {
-        FocusScope.of(context).requestFocus(_focusNodes[index - 1]);
-      }
+      _showSnack('✉️ Verification code resent! Check your inbox.');
+      _startCountdown();
+    } catch (e) {
+      _showSnack('Failed to resend: ${e.toString()}');
+      setState(() => _canResend = true); // re-enable on failure
     }
+  }
+
+  void _showSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
   Widget build(BuildContext context) {
-    final title = widget.isEmail ? 'Email Verification' : 'Phone Verification';
-    final subtitle1 = widget.isEmail ? 'We’ll send a code to your email to' : 'We’ll send a code to your number to';
-    final subtitle2 = 'confirm you own it.';
-
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black87),
+          icon: const Icon(Icons.arrow_back, color: Color(0xFF101113)),
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text(
@@ -141,108 +189,145 @@ class _VerificationScreenState extends State<VerificationScreen> {
           ),
         ),
         centerTitle: true,
+        systemOverlayStyle: SystemUiOverlayStyle.dark,
       ),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 40.0),
+          padding: const EdgeInsets.symmetric(horizontal: 28.0, vertical: 24.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              const SizedBox(height: 20),
+              const SizedBox(height: 24),
+
+              // Title
               Text(
-                title,
+                widget.isEmail ? 'Email Verification' : 'Phone Verification',
                 style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
                   color: Color(0xFF101113),
                 ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                subtitle1,
-                style: const TextStyle(color: Color(0xFF454752), fontSize: 16),
                 textAlign: TextAlign.center,
               ),
+              const SizedBox(height: 12),
+
+              // Subtitle
               Text(
-                subtitle2,
-                style: const TextStyle(color: Color(0xFF454752), fontSize: 16),
+                widget.isEmail
+                    ? "We'll send a code to your email to\nconfirm you own it."
+                    : "We'll send a code to your number to\nconfirm you own it.",
+                style: const TextStyle(
+                  color: Color(0xFF6B7280),
+                  fontSize: 15,
+                  height: 1.5,
+                ),
                 textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 32),
-              
-              // OTP Input Fields
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(8, (index) {
-                  return Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 2.0),
-                    width: 36,
-                    height: 50,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFD9D9D9),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(
-                        color: _focusNodes[index].hasFocus ? const Color(0xFF14EB80) : Colors.transparent,
-                        width: 1,
-                      ),
-                    ),
-                    child: TextField(
-                      controller: _controllers[index],
-                      focusNode: _focusNodes[index],
-                      keyboardType: TextInputType.number,
-                      textAlign: TextAlign.center,
-                      maxLength: 1,
-                      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF40434D)),
-                      decoration: const InputDecoration(
-                        counterText: '',
-                        border: InputBorder.none,
-                      ),
-                      onChanged: (value) => _onChanged(value, index),
-                    ),
-                  );
-                }),
               ),
               const SizedBox(height: 40),
 
+              // OTP Input Boxes
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(_otpLength, (index) {
+                  return AnimatedBuilder(
+                    animation: _focusNodes[index],
+                    builder: (context, _) {
+                      final isFocused = _focusNodes[index].hasFocus;
+                      return Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4.0),
+                        width: 44,
+                        height: 54,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF3F4F6),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: isFocused
+                                ? const Color(0xFF55A47A)
+                                : Colors.transparent,
+                            width: 1.5,
+                          ),
+                        ),
+                        child: TextField(
+                          controller: _controllers[index],
+                          focusNode: _focusNodes[index],
+                          keyboardType: TextInputType.number,
+                          textAlign: TextAlign.center,
+                          maxLength: 1,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF101113),
+                          ),
+                          decoration: const InputDecoration(
+                            counterText: '',
+                            border: InputBorder.none,
+                          ),
+                          onChanged: (value) => _onChanged(value, index),
+                        ),
+                      );
+                    },
+                  );
+                }),
+              ),
+
+              const SizedBox(height: 40),
+
+              // Resend Code Button
               if (_isLoading)
-                const CircularProgressIndicator(color: Color(0xFF51A77B))
-              else
+                const CircularProgressIndicator(color: Color(0xFF55A47A))
+              else ...[
                 SizedBox(
                   width: double.infinity,
-                  height: 56,
+                  height: 54,
                   child: ElevatedButton(
-                    onPressed: () {
-                      if (widget.isEmail) {
-                        // Resend Email Logic
-                        Supabase.instance.client.auth.resend(
-                          type: OtpType.signup,
-                          email: widget.contact,
-                        );
-                      } else {
-                        // Resend SMS Logic
-                        Supabase.instance.client.auth.resend(
-                          type: OtpType.sms,
-                          phone: widget.contact,
-                        );
-                      }
-                    },
+                    onPressed: _canResend ? _resendCode : null,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF51A77B), // Or BADDCC based on Figma state
+                      backgroundColor: _canResend
+                          ? const Color(0xFF55A47A)
+                          : const Color(0xFFBADDCC),
+                      disabledBackgroundColor: const Color(0xFFBADDCC),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
                       elevation: 0,
                     ),
-                    child: const Text(
-                      'Resend Code',
+                    child: Text(
+                      _canResend
+                          ? 'Resend Code'
+                          : 'Resend Code (0:${_secondsLeft.toString().padLeft(2, '0')})',
                       style: TextStyle(
-                        fontSize: 24,
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                        color: _canResend ? Colors.white : Colors.white70,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
                 ),
+                const SizedBox(height: 16),
+
+                // Verify Button (manual submit)
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: OutlinedButton(
+                    onPressed: _verifyOTP,
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF55A47A)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'Verify',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Color(0xFF55A47A),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),

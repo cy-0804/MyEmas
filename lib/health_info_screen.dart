@@ -13,43 +13,137 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
   String? _bloodType;
   String? _allergies;
   String? _mobilityStatus;
-  String? _chronicCondition;
+  // Multi-select for chronic conditions
+  final Set<String> _selectedConditions = {};
+  // Multi-select for allergies
+  final Set<String> _selectedAllergies = {};
   bool _isLoading = false;
 
-  final List<String> _bloodTypes = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'Unknown'];
+  final List<String> _bloodTypes = [
+    'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'Unknown'
+  ];
   final List<String> _yesNo = ['Yes', 'No'];
-  final List<String> _mobilityStatuses = ['Independent', 'Uses Cane', 'Uses Walker', 'Wheelchair Bound', 'Bedridden'];
-  final List<String> _chronicConditions = ['None', 'Cardiovascular', 'Diabetes', 'Hypertension', 'Arthritis', 'Asthma', 'Other'];
+  final List<String> _mobilityStatuses = [
+    'Independent', 'Uses Cane', 'Uses Walker', 'Wheelchair Bound', 'Bedridden'
+  ];
+  final List<String> _chronicConditions = [
+    'None', 'Cardiovascular', 'Diabetes', 'Hypertension',
+    'Arthritis', 'Asthma', 'Kidney Disease', 'Other'
+  ];
+  final List<String> _commonAllergies = [
+    'Penicillin', 'Aspirin', 'Sulfa', 'Codeine', 'Peanuts', 'Seafood', 'Eggs', 'Milk', 'Other'
+  ];
 
   Future<void> _saveAndNext() async {
     setState(() => _isLoading = true);
     try {
       final user = Supabase.instance.client.auth.currentUser;
-      if (user == null) throw Exception('No authenticated user found');
+      if (user == null) throw Exception('[Auth] No authenticated user found');
 
-      // Ensure a record exists in `elderly` table
-      final existingRecord = await Supabase.instance.client
-          .from('elderly')
-          .select()
-          .eq('user_id', user.id)
-          .maybeSingle();
+      debugPrint('DEBUG: user.id = ${user.id}');
+      debugPrint('DEBUG: user.email = ${user.email}');
 
-      final data = {
-        'blood_type': _bloodType,
-        'allergies': _allergies,
-        'mobility_status': _mobilityStatus,
-        'chronic_condition': _chronicCondition,
-      };
-      
-      data.removeWhere((key, value) => value == null);
+      // ── Step 1: Check if user exists in public.users ─────────────────────
+      Map<String, dynamic>? existingUser;
+      try {
+        existingUser = await Supabase.instance.client
+            .from('users')
+            .select('user_id, role_id')
+            .eq('user_id', user.id)
+            .maybeSingle();
+        debugPrint('DEBUG: existingUser = $existingUser');
+      } catch (e) {
+        throw Exception('[Step 1 - Read users] $e');
+      }
 
-      if (existingRecord == null) {
-        data['user_id'] = user.id;
-        await Supabase.instance.client.from('elderly').insert(data);
-      } else {
-        if (data.isNotEmpty) {
-          await Supabase.instance.client.from('elderly').update(data).eq('user_id', user.id);
+      // ── Step 2: Create users row if missing ──────────────────────────────
+      if (existingUser == null) {
+        try {
+          final insertData = <String, dynamic>{'user_id': user.id};
+          if (user.email != null) insertData['email'] = user.email;
+          if (user.phone != null && user.phone!.isNotEmpty) {
+            insertData['phone_num'] = user.phone;
+          }
+          insertData['role_id'] = 'elderly';
+          debugPrint('DEBUG: inserting into users: $insertData');
+          await Supabase.instance.client.from('users').insert(insertData);
+          debugPrint('DEBUG: users insert OK');
+        } catch (e) {
+          throw Exception('[Step 2 - Insert users] $e');
         }
+      } else if (existingUser['role_id'] == null) {
+        try {
+          await Supabase.instance.client
+              .from('users')
+              .update({'role_id': 'elderly'})
+              .eq('user_id', user.id);
+          debugPrint('DEBUG: users role_id updated');
+        } catch (e) {
+          throw Exception('[Step 2 - Update role_id] $e');
+        }
+      }
+
+      // ── Step 3: Build health data payload ───────────────────────────────
+      final chronicStr = _selectedConditions.isEmpty
+          ? null
+          : _selectedConditions.contains('None')
+              ? 'None'
+              : _selectedConditions.join(', ');
+
+      final data = <String, dynamic>{'user_id': user.id};
+      if (_bloodType != null) data['blood_type'] = _bloodType;
+      if (_allergies != null) data['allergies'] = _allergies;
+      if (_mobilityStatus != null) data['mobility_status'] = _mobilityStatus;
+      if (chronicStr != null) data['chronic_condition'] = chronicStr;
+      debugPrint('DEBUG: elderly upsert data = $data');
+
+      // ── Step 4: Upsert into elderly table ────────────────────────────────
+      try {
+        await Supabase.instance.client.from('elderly').upsert(
+          data,
+          onConflict: 'user_id',
+        );
+        debugPrint('DEBUG: elderly upsert OK');
+      } catch (e) {
+        throw Exception('[Step 4 - Upsert elderly] $e');
+      }
+
+      // ── Step 5: Save allergies to allergy_list ───────────────────────────
+      if (_allergies == 'Yes' && _selectedAllergies.isNotEmpty) {
+        try {
+          // Clear old ones first to prevent duplicates (if updating)
+          try { await Supabase.instance.client.from('allergy_list').delete().eq('elderly_id', user.id); } catch (_) {}
+
+          for (final allergyName in _selectedAllergies) {
+            final checkRes = await Supabase.instance.client
+                .from('allergy')
+                .select('allergy_id')
+                .eq('name', allergyName)
+                .maybeSingle();
+
+            String allergyId;
+            if (checkRes == null) {
+              final insRes = await Supabase.instance.client
+                  .from('allergy')
+                  .insert({'name': allergyName})
+                  .select('allergy_id')
+                  .single();
+              allergyId = insRes['allergy_id'] as String;
+            } else {
+              allergyId = checkRes['allergy_id'] as String;
+            }
+
+            await Supabase.instance.client.from('allergy_list').upsert({
+              'allergy_id': allergyId,
+              'elderly_id': user.id,
+            });
+          }
+          debugPrint('DEBUG: allergy_list upsert OK');
+        } catch (e) {
+          throw Exception('[Step 5 - Save allergies] $e');
+        }
+      } else if (_allergies == 'No') {
+        try { await Supabase.instance.client.from('allergy_list').delete().eq('elderly_id', user.id); } catch (_) {}
       }
 
       if (mounted) {
@@ -59,21 +153,34 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
         );
       }
     } catch (e) {
+      debugPrint('ERROR: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString()),
+            backgroundColor: Colors.red.shade600,
+            duration: const Duration(seconds: 8),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  Widget _buildDropdown(String label, String? value, List<String> items, ValueChanged<String?> onChanged) {
+  Widget _buildDropdown(
+    String label,
+    String? value,
+    List<String> items,
+    ValueChanged<String?> onChanged,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Text(
           label,
           style: const TextStyle(
+            fontFamily: 'Open Sans',
             fontSize: 20,
             fontWeight: FontWeight.w600,
             color: Color(0xFF6C7278),
@@ -109,7 +216,7 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                     child: Text(
                       item,
                       style: const TextStyle(
-                        fontSize: 24,
+                        fontSize: 22,
                         fontWeight: FontWeight.w500,
                         color: Color(0xFF27252E),
                       ),
@@ -119,6 +226,176 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
               }).toList(),
               onChanged: onChanged,
             ),
+          ),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _buildAllergySelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        const Text(
+          'Select your allergies',
+          style: TextStyle(
+            fontFamily: 'Open Sans',
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF6C7278),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 14,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: _commonAllergies.map((allergy) {
+              final isSelected = _selectedAllergies.contains(allergy);
+              return GestureDetector(
+                onTap: () {
+                  setState(() {
+                    if (isSelected) {
+                      _selectedAllergies.remove(allergy);
+                    } else {
+                      _selectedAllergies.add(allergy);
+                    }
+                  });
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? const Color(0xFFE53935)
+                        : const Color(0xFFF3F4F6),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: isSelected
+                          ? const Color(0xFFE53935)
+                          : Colors.grey.shade300,
+                      width: 1,
+                    ),
+                  ),
+                  child: Text(
+                    allergy,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: isSelected ? Colors.white : const Color(0xFF374151),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _buildChronicConditionSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        const Text(
+          'Chronic Condition',
+          style: TextStyle(
+            fontFamily: 'Open Sans',
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF6C7278),
+            letterSpacing: 0.6,
+          ),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Select all that apply',
+          style: TextStyle(
+            fontFamily: 'Open Sans',
+            fontSize: 12,
+            color: Color(0xFF9CA3AF),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 14,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: _chronicConditions.map((condition) {
+              final isSelected = _selectedConditions.contains(condition);
+              return GestureDetector(
+                onTap: () {
+                  setState(() {
+                    if (condition == 'None') {
+                      // Selecting "None" clears all other selections
+                      _selectedConditions.clear();
+                      _selectedConditions.add('None');
+                    } else {
+                      // Selecting any other condition removes "None"
+                      _selectedConditions.remove('None');
+                      if (isSelected) {
+                        _selectedConditions.remove(condition);
+                      } else {
+                        _selectedConditions.add(condition);
+                      }
+                    }
+                  });
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? const Color(0xFF51A77B)
+                        : const Color(0xFFF3F4F6),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: isSelected
+                          ? const Color(0xFF51A77B)
+                          : Colors.grey.shade300,
+                      width: 1,
+                    ),
+                  ),
+                  child: Text(
+                    condition,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: isSelected ? Colors.white : const Color(0xFF374151),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
           ),
         ),
         const SizedBox(height: 24),
@@ -148,6 +425,7 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                     const Text(
                       'Health Info',
                       style: TextStyle(
+                        fontFamily: 'League Spartan',
                         fontSize: 36,
                         fontWeight: FontWeight.w900,
                         color: Color(0xFF27252E),
@@ -159,6 +437,7 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                       'Select your basic health information for better experience',
                       textAlign: TextAlign.center,
                       style: TextStyle(
+                        fontFamily: 'Open Sans',
                         fontSize: 12,
                         fontWeight: FontWeight.w500,
                         color: Color(0xFF27252E),
@@ -167,10 +446,24 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                     ),
                     const SizedBox(height: 40),
 
-                    _buildDropdown('Blood Type', _bloodType, _bloodTypes, (v) => setState(() => _bloodType = v)),
-                    _buildDropdown('Allergies', _allergies, _yesNo, (v) => setState(() => _allergies = v)),
-                    _buildDropdown('Mobility Status', _mobilityStatus, _mobilityStatuses, (v) => setState(() => _mobilityStatus = v)),
-                    _buildDropdown('Chronic Condition', _chronicCondition, _chronicConditions, (v) => setState(() => _chronicCondition = v)),
+                    _buildDropdown(
+                      'Blood Type', _bloodType, _bloodTypes,
+                      (v) => setState(() => _bloodType = v),
+                    ),
+                    _buildDropdown(
+                      'Allergies', _allergies, _yesNo,
+                      (v) => setState(() {
+                        _allergies = v;
+                        if (v == 'No') _selectedAllergies.clear();
+                      }),
+                    ),
+                    if (_allergies == 'Yes') _buildAllergySelector(),
+                    _buildDropdown(
+                      'Mobility Status', _mobilityStatus, _mobilityStatuses,
+                      (v) => setState(() => _mobilityStatus = v),
+                    ),
+                    // Multi-select chip picker for chronic conditions
+                    _buildChronicConditionSelector(),
 
                     const SizedBox(height: 20),
                     SizedBox(
@@ -180,12 +473,18 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                         onPressed: _saveAndNext,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF51A77B),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
                           elevation: 0,
                         ),
                         child: const Text(
                           'Save & Continue',
-                          style: TextStyle(fontSize: 20, color: Colors.white, fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                            fontSize: 20,
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                     ),

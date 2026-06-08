@@ -78,6 +78,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                 'Let\'s Add Your Caregiver',
                 textAlign: TextAlign.center,
                 style: TextStyle(
+                  fontFamily: 'League Spartan',
                   fontSize: 32,
                   fontWeight: FontWeight.w900,
                   color: Color(0xFF27252E),
@@ -88,6 +89,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                 'Caregiver can easily connect to your account to monitor your health remotely. Ask them to scan the QR below to connect.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
+                  fontFamily: 'Open Sans',
                   fontSize: 14,
                   fontWeight: FontWeight.w500,
                   color: Color(0xFF6C7278),
@@ -116,6 +118,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                       const Text(
                         'MYEMAS QR',
                         style: TextStyle(
+                          fontFamily: 'League Spartan',
                           fontSize: 20,
                           fontWeight: FontWeight.bold,
                           color: Color(0xFF27252E),

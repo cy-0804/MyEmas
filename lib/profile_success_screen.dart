@@ -27,9 +27,10 @@ class ProfileSuccessScreen extends StatelessWidget {
               ),
               const SizedBox(height: 40),
               const Text(
-                'Profile Setup Complete!',
+                'Your profile is finalized!',
                 textAlign: TextAlign.center,
                 style: TextStyle(
+                  fontFamily: 'League Spartan',
                   fontSize: 28,
                   fontWeight: FontWeight.w900,
                   color: Color(0xFF27252E),
@@ -39,9 +40,10 @@ class ProfileSuccessScreen extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 40.0),
                 child: Text(
-                  'Your profile has been successfully set up. You can now start using MyEmas.',
+                  'You\'re all set! Enjoy MyEmas.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
+                    fontFamily: 'Open Sans',
                     fontSize: 16,
                     color: Colors.black87,
                   ),
@@ -68,7 +70,7 @@ class ProfileSuccessScreen extends StatelessWidget {
                       shadowColor: const Color(0xFF51A77B).withOpacity(0.3),
                     ),
                     child: const Text(
-                      'Go To Homepage',
+                      'Go to Home',
                       style: TextStyle(fontSize: 20, color: Colors.white, fontWeight: FontWeight.bold),
                     ),
                   ),

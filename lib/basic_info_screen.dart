@@ -127,6 +127,7 @@ class _BasicInfoScreenState extends State<BasicInfoScreen> {
       child: Text(
         text,
         style: const TextStyle(
+          fontFamily: 'Open Sans',
           fontSize: 16,
           fontWeight: FontWeight.w600,
           color: Color(0xFF6C7278),
@@ -168,9 +169,21 @@ class _BasicInfoScreenState extends State<BasicInfoScreen> {
                       child: Text(
                         'Basic Info',
                         style: TextStyle(
+                          fontFamily: 'League Spartan',
                           fontSize: 36,
                           fontWeight: FontWeight.w900,
                           color: Color(0xFF27252E),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Center(
+                      child: Text(
+                        'Select your basic info...',
+                        style: TextStyle(
+                          fontFamily: 'Open Sans',
+                          fontSize: 16,
+                          color: Color(0xFF47494A),
                         ),
                       ),
                     ),
