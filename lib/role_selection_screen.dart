@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'basic_info_screen.dart';
+import 'caregiver_basic_info_screen.dart';
 import 'login_screen.dart';
 
 class RoleSelectionScreen extends StatefulWidget {
@@ -25,10 +26,17 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
           .eq('user_id', user.id);
 
       if (mounted) {
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => const BasicInfoScreen()),
-        );
+        if (role == 'caregiver') {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const CaregiverBasicInfoScreen()),
+          );
+        } else {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const BasicInfoScreen()),
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -188,7 +196,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                       titleColor: const Color(0xFF00539E),
                       image1: 'caregiver.png',
                       image2: 'caregiver (1).png',
-                      onTap: null, // Coming soon
+                      onTap: () => _selectRole('caregiver'),
                     ),
                     const SizedBox(height: 40),
                   ],

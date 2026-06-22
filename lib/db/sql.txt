@@ -1,157 +1,130 @@
--- =========================
--- EXTENSIONS
--- =========================
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
 
--- =========================
--- ENUMS
--- =========================
-CREATE TYPE role_type AS ENUM ('elderly', 'caregiver');
-
-CREATE TYPE medication_status AS ENUM ('taken', 'missed');
-
-CREATE TYPE risk_level_type AS ENUM ('low', 'medium', 'high');
-
--- =========================
--- USER TABLE
--- =========================
-CREATE TABLE users (
-    user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    fullname TEXT,
-    gender TEXT,
-    date_of_birth DATE,
-    address TEXT,
-    email TEXT UNIQUE,
-    icno TEXT,
-    password_hash TEXT,
-    phone_num TEXT,
-    language TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    role_id role_type
+CREATE TABLE public.users (
+  user_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  fullname text,
+  gender text,
+  date_of_birth date,
+  address text,
+  email text UNIQUE,
+  icno text,
+  password_hash text,
+  phone_num text,
+  language text,
+  created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+  role_id USER-DEFINED,
+  CONSTRAINT users_pkey PRIMARY KEY (user_id)
 );
-
--- =========================
--- ELDERLY
--- =========================
-CREATE TABLE elderly (
-    user_id UUID PRIMARY KEY,
-    chronic_condition TEXT,
-    mobility_status TEXT,
-    blood_type TEXT,
-    allergies TEXT,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+CREATE TABLE public.elderly (
+  user_id uuid NOT NULL,
+  chronic_condition text,
+  mobility_status text,
+  blood_type text,
+  allergies text,
+  CONSTRAINT elderly_pkey PRIMARY KEY (user_id),
+  CONSTRAINT elderly_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id)
 );
-
--- =========================
--- CAREGIVER
--- =========================
-CREATE TABLE caregiver (
-    user_id UUID PRIMARY KEY,
-    organization TEXT,
-    availability TEXT,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+CREATE TABLE public.caregiver (
+  user_id uuid NOT NULL,
+  organization text,
+  availability text,
+  CONSTRAINT caregiver_pkey PRIMARY KEY (user_id),
+  CONSTRAINT caregiver_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id)
 );
-
--- =========================
--- CARE LINK
--- =========================
-CREATE TABLE care_link (
-    link_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    elderly_id UUID,
-    caregiver_id UUID,
-    relationship TEXT,
-    emergency_contact_primary BOOLEAN DEFAULT FALSE,
-    FOREIGN KEY (elderly_id) REFERENCES elderly(user_id) ON DELETE CASCADE,
-    FOREIGN KEY (caregiver_id) REFERENCES caregiver(user_id) ON DELETE CASCADE
+CREATE TABLE public.care_link (
+  link_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  elderly_id uuid,
+  caregiver_id uuid,
+  relationship text,
+  emergency_contact_primary boolean DEFAULT false,
+  CONSTRAINT care_link_pkey PRIMARY KEY (link_id),
+  CONSTRAINT care_link_elderly_id_fkey FOREIGN KEY (elderly_id) REFERENCES public.elderly(user_id),
+  CONSTRAINT care_link_caregiver_id_fkey FOREIGN KEY (caregiver_id) REFERENCES public.caregiver(user_id)
 );
-
--- =========================
--- HEALTH RECORD
--- =========================
-CREATE TABLE health_record (
-    record_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    elderly_id UUID,
-    blood_pressure TEXT,
-    heart_rate INT,
-    glucose_level FLOAT,
-    temperature FLOAT,
-    mood TEXT,
-    device_type TEXT,
-    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (elderly_id) REFERENCES elderly(user_id) ON DELETE CASCADE
+CREATE TABLE public.health_record (
+  record_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  elderly_id uuid NOT NULL,
+  blood_pressure text,
+  heart_rate integer,
+  glucose_level double precision,
+  temperature double precision,
+  recorded_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT health_record_pkey PRIMARY KEY (record_id),
+  CONSTRAINT health_record_elderly_id_fkey FOREIGN KEY (elderly_id) REFERENCES public.elderly(user_id)
 );
-
--- =========================
--- HEALTH RISK ASSESSMENT
--- =========================
-CREATE TABLE health_risk_assessment (
-    risk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    record_id UUID,
-    risk_level risk_level_type,
-    recommendation TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (record_id) REFERENCES health_record(record_id) ON DELETE CASCADE
+CREATE TABLE public.health_risk_assessment (
+  risk_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  record_id uuid,
+  risk_level USER-DEFINED,
+  recommendation text,
+  created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT health_risk_assessment_pkey PRIMARY KEY (risk_id),
+  CONSTRAINT health_risk_assessment_record_id_fkey FOREIGN KEY (record_id) REFERENCES public.health_record(record_id)
 );
-
--- =========================
--- SCHEDULE
--- =========================
-CREATE TABLE schedule (
-    schedule_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    elderly_id UUID,
-    title TEXT,
-    schedule_date_time TIMESTAMP,
-    location TEXT,
-    notes TEXT,
-    FOREIGN KEY (elderly_id) REFERENCES elderly(user_id) ON DELETE CASCADE
+CREATE TABLE public.schedule (
+  schedule_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  elderly_id uuid,
+  title text,
+  schedule_date_time timestamp without time zone,
+  location text,
+  notes text,
+  CONSTRAINT schedule_pkey PRIMARY KEY (schedule_id),
+  CONSTRAINT schedule_elderly_id_fkey FOREIGN KEY (elderly_id) REFERENCES public.elderly(user_id)
 );
-
--- =========================
--- REMINDER
--- =========================
-CREATE TABLE reminder (
-    reminder_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    type TEXT,
-    message TEXT,
-    reminder_time TIMESTAMP
+CREATE TABLE public.reminder (
+  reminder_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  type text,
+  message text,
+  reminder_time timestamp without time zone,
+  CONSTRAINT reminder_pkey PRIMARY KEY (reminder_id)
 );
-
--- =========================
--- MEDICATIONS
--- =========================
-CREATE TABLE medications (
-    medication_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    medication_name TEXT,
-    dosage TEXT,
-    frequency TEXT,
-    instruction TEXT,
-    medication_stock INT,
-    medical_notes TEXT,
-    schedule_id UUID,
-    FOREIGN KEY (schedule_id) REFERENCES schedule(schedule_id) ON DELETE SET NULL
+CREATE TABLE public.medications (
+  medication_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  medication_name text,
+  dosage text,
+  when_to_take text,
+  instruction text,
+  medication_stock integer,
+  medical_notes text,
+  schedule_id uuid,
+  expiration_date date,
+  priority text,
+  photo text,
+  CONSTRAINT medications_pkey PRIMARY KEY (medication_id),
+  CONSTRAINT medications_schedule_id_fkey FOREIGN KEY (schedule_id) REFERENCES public.schedule(schedule_id)
 );
-
--- =========================
--- MEDICATION LOGS
--- =========================
-CREATE TABLE medication_logs (
-    log_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    medication_id UUID,
-    status medication_status,
-    logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (medication_id) REFERENCES medications(medication_id) ON DELETE CASCADE
+CREATE TABLE public.medication_logs (
+  log_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  medication_id uuid,
+  status USER-DEFINED,
+  logged_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT medication_logs_pkey PRIMARY KEY (log_id),
+  CONSTRAINT medication_logs_medication_id_fkey FOREIGN KEY (medication_id) REFERENCES public.medications(medication_id)
 );
-
--- =========================
--- EMERGENCY LOGS
--- =========================
-CREATE TABLE emergency_logs (
-    alert_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    link_id UUID,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    status TEXT,
-    location TEXT,
-    caregiver_id UUID,
-    FOREIGN KEY (link_id) REFERENCES care_link(link_id) ON DELETE CASCADE,
-    FOREIGN KEY (caregiver_id) REFERENCES caregiver(user_id) ON DELETE SET NULL
+CREATE TABLE public.emergency_logs (
+  alert_id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  link_id uuid,
+  timestamp timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+  status text,
+  location text,
+  caregiver_id uuid,
+  CONSTRAINT emergency_logs_pkey PRIMARY KEY (alert_id),
+  CONSTRAINT emergency_logs_link_id_fkey FOREIGN KEY (link_id) REFERENCES public.care_link(link_id),
+  CONSTRAINT emergency_logs_caregiver_id_fkey FOREIGN KEY (caregiver_id) REFERENCES public.caregiver(user_id)
+);
+CREATE TABLE public.allergy (
+  allergy_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  type text,
+  symptoms text,
+  CONSTRAINT allergy_pkey PRIMARY KEY (allergy_id)
+);
+CREATE TABLE public.allergy_list (
+  allergy_id uuid NOT NULL,
+  elderly_id uuid NOT NULL,
+  recommendation text,
+  CONSTRAINT allergy_list_pkey PRIMARY KEY (allergy_id, elderly_id),
+  CONSTRAINT allergy_list_allergy_id_fkey FOREIGN KEY (allergy_id) REFERENCES public.allergy(allergy_id),
+  CONSTRAINT allergy_list_elderly_id_fkey FOREIGN KEY (elderly_id) REFERENCES public.elderly(user_id)
 );

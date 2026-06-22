@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'sign_up_screen.dart';
 import 'role_selection_screen.dart';
 import 'elderly_dashboard.dart';
+import 'caregiver_dashboard.dart';
 import 'biometric_prompt_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -167,14 +168,15 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _navigateToDashboard(String role) {
-    // Import at top of file: import 'elderly_dashboard.dart';
     Widget dashboard;
     switch (role) {
       case 'elderly':
         dashboard = const ElderlyDashboard();
         break;
+      case 'caregiver':
+        dashboard = const CaregiverDashboard();
+        break;
       default:
-        // Caregiver or unknown — fall back to role selection for now
         dashboard = const RoleSelectionScreen();
     }
     Navigator.pushReplacement(

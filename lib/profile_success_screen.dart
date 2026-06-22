@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'elderly_dashboard.dart';
 
 class ProfileSuccessScreen extends StatelessWidget {
-  const ProfileSuccessScreen({super.key});
+  final Widget? nextScreen;
+  const ProfileSuccessScreen({super.key, this.nextScreen});
 
   @override
   Widget build(BuildContext context) {
@@ -59,7 +60,7 @@ class ProfileSuccessScreen extends StatelessWidget {
                     onPressed: () {
                       Navigator.pushAndRemoveUntil(
                         context,
-                        MaterialPageRoute(builder: (_) => const ElderlyDashboard()),
+                        MaterialPageRoute(builder: (_) => nextScreen ?? const ElderlyDashboard()),
                         (route) => false, // Remove all previous routes
                       );
                     },

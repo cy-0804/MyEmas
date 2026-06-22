@@ -11,8 +11,9 @@ const _kTextGrey = Color(0xFF6C7278);
 
 class AddEditScheduleScreen extends StatefulWidget {
   final ScheduleRecord? existing;
+  final String? elderlyId;
 
-  const AddEditScheduleScreen({super.key, this.existing});
+  const AddEditScheduleScreen({super.key, this.existing, this.elderlyId});
 
   @override
   State<AddEditScheduleScreen> createState() => _AddEditScheduleScreenState();
@@ -145,8 +146,22 @@ class _AddEditScheduleScreenState extends State<AddEditScheduleScreen> {
     setState(() => _saving = true);
 
     try {
-      final uid = _db.auth.currentUser?.id;
+      final uid = widget.elderlyId ?? _db.auth.currentUser?.id;
       if (uid == null) throw Exception('Not logged in');
+
+      // Ensure the user exists in the elderly table (e.g. if they clicked 'Skip for now' on onboarding)
+      final elderlyRes = await _db
+          .from('elderly')
+          .select('user_id')
+          .eq('user_id', uid)
+          .limit(1)
+          .maybeSingle();
+
+      if (elderlyRes == null) {
+        await _db.from('elderly').insert({
+          'user_id': uid,
+        });
+      }
 
       // Pack additional form properties into notes metadata
       final finalNotes = ScheduleMetadata.toNotesString(

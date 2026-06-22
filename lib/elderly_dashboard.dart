@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
+import 'medication_missed_checker.dart';
 import 'health_dashboard_view.dart';
 import 'medication_dashboard_view.dart';
 import 'schedule_dashboard_view.dart';
 import 'add_edit_schedule_screen.dart';
 import 'login_screen.dart';
 import 'voice_search_helper.dart';
+import 'sos_service.dart';
+import 'sos_active_screen.dart';
+import 'elderly_settings_screen.dart';
 
 const _kPrimary = Color(0xFF51A77B);
 const _kBlue    = Color(0xFF00539E);
 const _kBg      = Color(0xFFF6F8FA);
+const _kTextDark = Color(0xFF27252E);
 
 class ElderlyDashboard extends StatefulWidget {
   const ElderlyDashboard({super.key});
@@ -24,6 +29,13 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
   bool _loadingSchedules = true;
   HealthRecord? _latestRecord;
 
+  // SOS State
+  final SosService _sosService = SosService();
+  bool _sosHolding = false;
+  double _sosProgress = 0.0;
+  static const int _sosDurationMs = 3000;
+  DateTime? _holdStartTime;
+
   @override
   void initState() {
     super.initState();
@@ -32,8 +44,12 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
 
   Future<void> _loadUserData() async {
     try {
-      final uid = Supabase.instance.client.auth.currentUser?.id;
+      final db = Supabase.instance.client;
+      final uid = db.auth.currentUser?.id;
       if (uid == null) return;
+
+      // Run the retroactive missed medication check
+      await MedicationMissedChecker.checkAndMarkMissed(uid);
 
       // Load user name
       final userData = await Supabase.instance.client
@@ -130,7 +146,7 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
                       const HealthDashboardView(),
                       const MedicationDashboardView(),
                       const ScheduleDashboardView(),
-                      _buildSettingsTab(),
+                      const ElderlySettingsScreen(),
                     ],
                   ),
                   // SOS Floating Button
@@ -159,7 +175,7 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
     final greeting = now.hour < 12 ? 'Good Morning' : now.hour < 17 ? 'Good Afternoon' : 'Good Evening';
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.only(bottom: 100),
+      padding: const EdgeInsets.only(bottom: 160),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -249,8 +265,8 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
               children: [
                 _buildQuickAction('Health Record', Icons.monitor_heart, const Color(0xFFE8F5E9), _kPrimary, _openAddHealthRecord),
                 _buildQuickAction('Log Medicine', Icons.medication_liquid, const Color(0xFFE3F2FD), _kBlue, _openAddMedicine),
-                _buildQuickAction('Schedule', Icons.calendar_month, const Color(0xFFFFF3E0), Colors.orange, () => setState(() => _selectedIndex = 3)),
-                _buildQuickAction('Emergency', Icons.sos_outlined, const Color(0xFFFFEBEE), Colors.red, () {}),
+                _buildQuickAction('Schedule', Icons.calendar_month, const Color(0xFFFFF3E0), Colors.orange, _openAddSchedule),
+                _buildQuickAction('Settings', Icons.settings_rounded, const Color(0xFFF3E5F5), Colors.purple, () => setState(() => _selectedIndex = 4)),
               ],
             ),
           ),
@@ -348,96 +364,101 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
     ]);
   }
 
-  // ─── Settings Tab ────────────────────────────────────────────────────────────
-  Widget _buildSettingsTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.only(bottom: 100),
-      child: Column(children: [
-        const SizedBox(height: 24),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Text('Settings', style: const TextStyle(fontFamily: 'League Spartan', fontSize: 28, fontWeight: FontWeight.w900, color: Color(0xFF27252E))),
-        ),
-        const SizedBox(height: 24),
-        // Profile section
-        Container(
-          margin: const EdgeInsets.symmetric(horizontal: 20),
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade200)),
-          child: Row(children: [
-            CircleAvatar(radius: 30, backgroundColor: _kPrimary.withOpacity(0.15), child: Text(_userName.isNotEmpty ? _userName[0].toUpperCase() : 'U', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: _kPrimary))),
-            const SizedBox(width: 16),
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(_userName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF27252E))),
-              Text(Supabase.instance.client.auth.currentUser?.email ?? '', style: TextStyle(fontSize: 16, color: Colors.grey.shade500)),
-            ]),
-          ]),
-        ),
-        const SizedBox(height: 24),
-        _settingsItem(Icons.person_outline, 'My Profile', _kBlue),
-        _settingsItem(Icons.lock_outline, 'Change Password', _kBlue),
-        _settingsItem(Icons.language, 'Language', _kBlue),
-        _settingsItem(Icons.notifications_none, 'Notifications', _kBlue),
-        _settingsItem(Icons.help_outline, 'Help & Support', _kBlue),
-        const SizedBox(height: 12),
-        _settingsItem(Icons.logout, 'Log Out', Colors.red, onTap: () async {
-          await Supabase.instance.client.auth.signOut();
-          if (mounted) {
-            Navigator.of(context).pushAndRemoveUntil(
-              MaterialPageRoute(builder: (_) => const LoginScreen()),
-              (r) => false,
-            );
-          }
-        }),
-      ]),
-    );
-  }
-
-  Widget _settingsItem(IconData icon, String label, Color color, {VoidCallback? onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.only(left: 20, right: 20, bottom: 10),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
-        child: Row(children: [
-          Icon(icon, color: color, size: 22),
-          const SizedBox(width: 14),
-          Text(label, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: label == 'Log Out' ? Colors.red : const Color(0xFF27252E))),
-          const Spacer(),
-          Icon(Icons.chevron_right, color: Colors.grey.shade400),
-        ]),
-      ),
-    );
-  }
+  // Settings tab is now handled by ElderlySettingsScreen
 
   // ─── SOS Button ──────────────────────────────────────────────────────────────
   Widget _buildSosButton() {
     return GestureDetector(
-      onLongPress: () {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('🆘 SOS Alert Sent!'), backgroundColor: Colors.red));
+      onLongPressStart: (_) {
+        _holdStartTime = DateTime.now();
+        setState(() { _sosHolding = true; _sosProgress = 0.0; });
+        _runSosCountdown();
       },
-      child: Container(
-        width: 70, height: 70,
+      onLongPressEnd: (_) {
+        if (_sosProgress < 1.0) {
+          // Released too early — cancel
+          setState(() { _sosHolding = false; _sosProgress = 0.0; });
+        }
+      },
+      onLongPressCancel: () {
+        setState(() { _sosHolding = false; _sosProgress = 0.0; });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: _sosHolding ? 80 : 70,
+        height: _sosHolding ? 80 : 70,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: Colors.white,
-          boxShadow: [BoxShadow(color: Colors.red.withOpacity(0.25), blurRadius: 16, spreadRadius: 4)],
-        ),
-        child: Center(
-          child: Container(
-            width: 55, height: 55,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(colors: [Color(0xFFFF9D5C), Color(0xFFFF5252)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.red.withValues(alpha: _sosHolding ? 0.5 : 0.25),
+              blurRadius: _sosHolding ? 24 : 16,
+              spreadRadius: _sosHolding ? 8 : 4,
             ),
-            child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Text('SOS', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, height: 1.0)),
-              Text('Hold', style: TextStyle(color: Colors.white70, fontSize: 9)),
-            ]),
-          ),
+          ],
+        ),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Countdown ring
+            if (_sosHolding)
+              SizedBox(
+                width: 78,
+                height: 78,
+                child: CircularProgressIndicator(
+                  value: _sosProgress,
+                  strokeWidth: 4,
+                  color: Colors.red,
+                  backgroundColor: Colors.red.withValues(alpha: 0.2),
+                ),
+              ),
+            Container(
+              width: 56,
+              height: 56,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  colors: [Color(0xFFFF9D5C), Color(0xFFFF5252)],
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                ),
+              ),
+              child: const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('SOS', style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold, height: 1.0)),
+                  Text('Hold', style: TextStyle(color: Colors.white70, fontSize: 9)),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
+    );
+  }
+
+  void _runSosCountdown() async {
+    const steps = 60;
+    final stepDuration = Duration(milliseconds: _sosDurationMs ~/ steps);
+
+    for (int i = 1; i <= steps; i++) {
+      await Future.delayed(stepDuration);
+      if (!_sosHolding || !mounted) return; // Cancelled
+      setState(() => _sosProgress = i / steps);
+    }
+
+    // 3 seconds complete — trigger SOS
+    if (!mounted) return;
+    setState(() { _sosHolding = false; _sosProgress = 0.0; });
+    _triggerSos();
+  }
+
+  Future<void> _triggerSos() async {
+    // Navigate to SOS active screen first
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const SosActiveScreen()),
     );
   }
 

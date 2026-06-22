@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'ai_health_service.dart';
 
 // ─── colour tokens ───────────────────────────────────────────────────────────
 const _kPrimary   = Color(0xFF51A77B);
@@ -158,7 +159,7 @@ class _HealthDashboardViewState extends State<HealthDashboardView> {
       onRefresh: _load,
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.only(bottom: 100),
+        padding: const EdgeInsets.only(bottom: 160),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -637,6 +638,21 @@ class _AddEditHealthRecordScreenState extends State<AddEditHealthRecordScreen> {
     setState(() => _saving = true);
     try {
       final db = Supabase.instance.client;
+
+      // Ensure the user exists in the elderly table (e.g. if they clicked 'Skip for now' on onboarding)
+      final elderlyRes = await db
+          .from('elderly')
+          .select('user_id')
+          .eq('user_id', widget.elderlyId)
+          .limit(1)
+          .maybeSingle();
+
+      if (elderlyRes == null) {
+        await db.from('elderly').insert({
+          'user_id': widget.elderlyId,
+        });
+      }
+
       final data = <String, dynamic>{
         'elderly_id': widget.elderlyId,
         if (_bpCtrl.text.trim().isNotEmpty)   'blood_pressure': _bpCtrl.text.trim(),
@@ -645,11 +661,67 @@ class _AddEditHealthRecordScreenState extends State<AddEditHealthRecordScreen> {
         if (_tempCtrl.text.trim().isNotEmpty) 'temperature':    double.tryParse(_tempCtrl.text.trim()),
       };
 
+      String recordId;
       if (widget.existing != null) {
-        await db.from('health_record').update(data).eq('record_id', widget.existing!.id);
+        recordId = widget.existing!.id;
+        await db.from('health_record').update(data).eq('record_id', recordId);
       } else {
-        await db.from('health_record').insert(data);
+        final res = await db.from('health_record').insert(data).select('record_id').single();
+        recordId = res['record_id'] as String;
       }
+
+      // AI-based intelligent risk detection
+      String riskLevel = 'low';
+      String recommendation = 'Vitals are within normal range. Continue maintaining a healthy lifestyle and regular check-ups.';
+
+      try {
+        final bpStr = _bpCtrl.text.trim();
+        final hr = int.tryParse(_hrCtrl.text.trim());
+        final gluc = double.tryParse(_glucCtrl.text.trim());
+        final temp = double.tryParse(_tempCtrl.text.trim());
+
+        final aiResult = await AiHealthService.evaluateImmediateRisk(
+          elderlyId: widget.elderlyId,
+          bloodPressure: bpStr.isEmpty ? null : bpStr,
+          heartRate: hr,
+          glucoseLevel: gluc,
+          temperature: temp,
+        );
+
+        riskLevel = aiResult['risk_level']?.toString().toLowerCase() ?? 'low';
+        recommendation = aiResult['recommendation']?.toString() ?? recommendation;
+        
+        // Ensure riskLevel is one of the valid enums just in case
+        if (!['low', 'medium', 'high'].contains(riskLevel)) {
+          riskLevel = 'low';
+        }
+      } catch (e) {
+        debugPrint("AI Risk Evaluation failed, falling back to basic rule: \$e");
+        // Simple fallback
+        final sys = int.tryParse(_bpCtrl.text.trim().split('/').firstOrNull ?? '');
+        final hr = int.tryParse(_hrCtrl.text.trim());
+        final gluc = double.tryParse(_glucCtrl.text.trim());
+        if ((sys != null && sys > 180) || (hr != null && (hr > 120 || hr < 50)) || (gluc != null && (gluc > 15.0 || gluc < 3.9))) {
+          riskLevel = 'high';
+          recommendation = 'Critical Warning: Immediate medical attention is required.';
+        }
+      }
+
+      // Save automatic risk assessment
+      final existingRisk = await db.from('health_risk_assessment').select('risk_id').eq('record_id', recordId).maybeSingle();
+      if (existingRisk != null) {
+        await db.from('health_risk_assessment').update({
+          'risk_level': riskLevel,
+          'recommendation': recommendation,
+        }).eq('risk_id', existingRisk['risk_id']);
+      } else {
+        await db.from('health_risk_assessment').insert({
+          'record_id': recordId,
+          'risk_level': riskLevel,
+          'recommendation': recommendation,
+        });
+      }
+
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));

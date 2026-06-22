@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import 'add_edit_schedule_screen.dart';
+import 'medication_dashboard_view.dart';
 
 // ─── STYLE CONSTANTS ──────────────────────────────────────────────────────────
 const _kPrimary = Color(0xFF51A77B);
@@ -161,7 +162,8 @@ class ScheduleMetadata {
 
 // ─── MAIN WIDGET VIEW ────────────────────────────────────────────────────────
 class ScheduleDashboardView extends StatefulWidget {
-  const ScheduleDashboardView({super.key});
+  final String? elderlyId;
+  const ScheduleDashboardView({super.key, this.elderlyId});
 
   @override
   State<ScheduleDashboardView> createState() => _ScheduleDashboardViewState();
@@ -187,7 +189,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
   Future<void> _fetchSchedules() async {
     setState(() => _loading = true);
     try {
-      final uid = _db.auth.currentUser?.id;
+      final uid = widget.elderlyId ?? _db.auth.currentUser?.id;
       if (uid == null) return;
 
       final res = await _db
@@ -196,21 +198,78 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
           .eq('elderly_id', uid)
           .order('schedule_date_time', ascending: true);
 
+      final schedules = (res as List).map((m) => ScheduleRecord.fromMap(m)).toList();
+      bool needsRefresh = false;
+      
+      final now = DateTime.now();
+      for (final record in schedules) {
+        if (record.repeatFrequency != null && record.repeatFrequency != 'None') {
+          // Check if the day has passed
+          if (!_isSameDay(record.scheduleDateTime, now) && record.scheduleDateTime.isBefore(now)) {
+             DateTime nextDateTime = record.scheduleDateTime;
+             while (nextDateTime.isBefore(now) && !_isSameDay(nextDateTime, now)) {
+               if (record.repeatFrequency == 'Daily') {
+                 nextDateTime = nextDateTime.add(const Duration(days: 1));
+               } else if (record.repeatFrequency == 'Weekly') {
+                 nextDateTime = nextDateTime.add(const Duration(days: 7));
+               } else if (record.repeatFrequency == 'Monthly') {
+                 nextDateTime = DateTime(nextDateTime.year, nextDateTime.month + 1, nextDateTime.day, nextDateTime.hour, nextDateTime.minute);
+               } else {
+                 break;
+               }
+             }
+             
+             final newNotes = ScheduleMetadata.toNotesString(
+               notesText: record.cleanNotes,
+               type: record.scheduleType,
+               priority: record.priority,
+               status: 'pending',
+               allDay: record.allDay,
+               endDateTime: record.endDateTime,
+               reminderTime: record.reminderTime,
+               repeat: record.repeatFrequency,
+               photoUrl: record.photoUrl,
+             );
+             
+             await _db.from('schedule').update({
+               'schedule_date_time': nextDateTime.toUtc().toIso8601String(),
+               'notes': newNotes,
+             }).eq('schedule_id', record.id);
+             
+             needsRefresh = true;
+          }
+        }
+      }
+
+      if (needsRefresh) {
+        final res2 = await _db.from('schedule').select().eq('elderly_id', uid).order('schedule_date_time', ascending: true);
+        if (mounted) {
+          setState(() {
+            _allSchedules = (res2 as List).map((m) => ScheduleRecord.fromMap(m)).toList();
+            _loading = false;
+          });
+        }
+        return;
+      }
+
       if (mounted) {
         setState(() {
-          _allSchedules = (res as List).map((m) => ScheduleRecord.fromMap(m)).toList();
+          _allSchedules = schedules;
           _loading = false;
         });
       }
     } catch (e) {
-      debugPrint('Error fetching schedules: $e');
-      if (mounted) setState(() => _loading = false);
+      debugPrint('Schedule load error: $e');
+      if (mounted) {
+        setState(() => _loading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Load Schedule Error: $e'), backgroundColor: Colors.red));
+      }
     }
   }
 
   Future<void> _updateStatus(ScheduleRecord record, String newStatus) async {
     try {
-      final updatedNotes = ScheduleMetadata.toNotesString(
+      final newNotes = ScheduleMetadata.toNotesString(
         notesText: record.cleanNotes,
         type: record.scheduleType,
         priority: record.priority,
@@ -223,7 +282,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
       );
 
       await _db.from('schedule').update({
-        'notes': updatedNotes,
+        'notes': newNotes,
       }).eq('schedule_id', record.id);
 
       _fetchSchedules();
@@ -231,7 +290,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Schedule marked as ${newStatus.toUpperCase()}'),
+            content: Text('Schedule updated successfully'),
             backgroundColor: _kPrimary,
           ),
         );
@@ -259,7 +318,10 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => AddEditScheduleScreen(existing: existing),
+        builder: (_) => AddEditScheduleScreen(
+          existing: existing,
+          elderlyId: widget.elderlyId,
+        ),
       ),
     );
     if (result == true) {
@@ -279,14 +341,58 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
       }
 
       // 2. Date/Calendar Filter based on viewMode
+      bool isMatch = false;
+      
       if (_viewMode == 'Day View') {
-        return _isSameDay(item.scheduleDateTime, _selectedDate);
+        isMatch = _isSameDay(item.scheduleDateTime, _selectedDate);
       } else if (_viewMode == 'Week View') {
-        return _isSameWeek(item.scheduleDateTime, _selectedDate);
+        isMatch = _isSameWeek(item.scheduleDateTime, _selectedDate);
       } else {
-        // Month View
-        return _isSameMonth(item.scheduleDateTime, _selectedDate);
+        isMatch = _isSameMonth(item.scheduleDateTime, _selectedDate);
       }
+      
+      // If it doesn't match directly, check if it's a repeating event that falls into the selected period
+      if (!isMatch && item.repeatFrequency != null && item.repeatFrequency != 'None') {
+        final start = DateTime(item.scheduleDateTime.year, item.scheduleDateTime.month, item.scheduleDateTime.day);
+        final target = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+        
+        // Only show repeating events on or after their start date
+        if (!target.isBefore(start)) {
+           if (_viewMode == 'Day View') {
+             if (item.repeatFrequency == 'Daily') isMatch = true;
+             else if (item.repeatFrequency == 'Weekly' && start.weekday == target.weekday) isMatch = true;
+             else if (item.repeatFrequency == 'Monthly' && start.day == target.day) isMatch = true;
+           } else if (_viewMode == 'Week View') {
+             // For week view, Daily and Weekly always appear in subsequent weeks
+             if (item.repeatFrequency == 'Daily' || item.repeatFrequency == 'Weekly') isMatch = true;
+             else if (item.repeatFrequency == 'Monthly') {
+                // Check if the target week contains the monthly day
+                final selectedMonday = _selectedDate.subtract(Duration(days: _selectedDate.weekday - 1));
+                final startOfWeek = DateTime(selectedMonday.year, selectedMonday.month, selectedMonday.day);
+                final endOfWeek = startOfWeek.add(const Duration(days: 6));
+                
+                // Construct the repeating day in the target month
+                final repeatDayThisMonth = DateTime(target.year, target.month, start.day);
+                if (!repeatDayThisMonth.isBefore(startOfWeek) && !repeatDayThisMonth.isAfter(endOfWeek)) {
+                  isMatch = true;
+                } else {
+                  // Might be in the overlapping month
+                  final repeatDayNextMonth = DateTime(target.year, target.month + 1, start.day);
+                  if (!repeatDayNextMonth.isBefore(startOfWeek) && !repeatDayNextMonth.isAfter(endOfWeek)) {
+                    isMatch = true;
+                  }
+                }
+             }
+           } else {
+             // Month View
+             if (item.repeatFrequency == 'Daily' || item.repeatFrequency == 'Weekly' || item.repeatFrequency == 'Monthly') {
+               isMatch = true;
+             }
+           }
+        }
+      }
+      
+      return isMatch;
     }).toList();
   }
 
@@ -327,7 +433,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
               color: _kPrimary,
               child: SingleChildScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 160),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -340,10 +446,33 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     const SizedBox(height: 14),
 
                     // Next Event Section
-                    if (_viewMode == 'Day View' && _nextEvent != null) ...[
+                    if (_viewMode == 'Day View') ...[
                       _buildSectionHeader('Next Event'),
                       const SizedBox(height: 8),
-                      _buildNextEventCard(_nextEvent!),
+                      if (_nextEvent != null)
+                        _buildNextEventCard(_nextEvent!)
+                      else
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: const Row(
+                            children: [
+                              Icon(Icons.event_available, color: _kPrimary),
+                              SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  'You have no upcoming events for today.',
+                                  style: TextStyle(color: Colors.grey, fontSize: 15, fontWeight: FontWeight.w500),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       const SizedBox(height: 18),
                     ],
 
@@ -369,7 +498,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     // Help instructions
                     Center(
                       child: Text(
-                        'Tap card to view details • Swipe Left to edit/delete',
+                        'Tap card to view details',
                         style: TextStyle(
                           color: Colors.grey.shade500,
                           fontSize: 12,
@@ -501,10 +630,17 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
         ],
       ),
       child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Left Time Column
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            if (event.scheduleType.toLowerCase() == 'medication') {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => MedicationDashboardView(elderlyId: event.elderlyId, isStandalone: true)));
+            }
+          },
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Left Time Column
             Container(
               width: 80,
               alignment: Alignment.center,
@@ -595,60 +731,62 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     ),
                   const SizedBox(height: 12),
                   // Done / Skip Buttons
-                  Row(
-                    children: [
-                      Expanded(
-                        child: InkWell(
-                          onTap: () => _updateStatus(event, 'done'),
-                          child: Container(
-                            height: 32,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: _kPrimary,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Text(
-                              'Done',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                  if (event.scheduleType.toLowerCase() != 'medication')
+                    Row(
+                      children: [
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => _updateStatus(event, 'done'),
+                            child: Container(
+                              height: 32,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: _kPrimary,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Text(
+                                'Done',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: InkWell(
-                          onTap: () => _updateStatus(event, 'skip'),
-                          child: Container(
-                            height: 32,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              border: Border.all(color: Colors.red),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Text(
-                              'Skip',
-                              style: TextStyle(
-                                color: Colors.red,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => _updateStatus(event, 'skip'),
+                            child: Container(
+                              height: 32,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.red),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Text(
+                                'Skip',
+                                style: TextStyle(
+                                  color: Colors.red,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  )
+                      ],
+                    )
                 ],
               ),
             ),
           ],
         ),
-      ),
-    );
+      ), // close GestureDetector
+      ), // close IntrinsicHeight
+    ); // close Container
   }
 
   Widget _buildFiltersAndSelectors() {
@@ -1053,34 +1191,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
     final timeStr = timeFormat.format(item.scheduleDateTime);
     final amPmStr = amPmFormat.format(item.scheduleDateTime);
 
-    return Dismissible(
-      key: Key(item.id),
-      direction: DismissDirection.endToStart,
-      confirmDismiss: (dir) async {
-        // Show swipe options or delete immediately
-        return await _showSwipeActionsDialog(item);
-      },
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        margin: const EdgeInsets.only(bottom: 12),
-        decoration: BoxDecoration(
-          color: Colors.red.shade400,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: const Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            Text(
-              'Delete / Edit',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-            ),
-            SizedBox(width: 8),
-            Icon(Icons.delete_sweep, color: Colors.white),
-          ],
-        ),
-      ),
-      child: Container(
+    return Container(
         margin: const EdgeInsets.only(bottom: 12),
         decoration: BoxDecoration(
           color: Colors.white,
@@ -1095,10 +1206,18 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
           ],
         ),
         child: InkWell(
-          onTap: () => _showDetailsDialog(item),
+          onTap: () {
+            if (item.scheduleType.toLowerCase() == 'medication') {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => MedicationDashboardView(elderlyId: item.elderlyId, isStandalone: true)));
+            } else {
+              _showDetailsDialog(item);
+            }
+          },
           borderRadius: BorderRadius.circular(10),
-          child: IntrinsicHeight(
-            child: Row(
+          child: Column(
+            children: [
+              IntrinsicHeight(
+                child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // Left Time
@@ -1202,8 +1321,72 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
               ],
             ),
           ),
+            const Divider(height: 1, thickness: 1),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        if (item.scheduleType.toLowerCase() == 'medication') {
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => MedicationDashboardView(elderlyId: item.elderlyId, isStandalone: true)));
+                        } else {
+                          _navigateToAddEdit(existing: item);
+                        }
+                      },
+                      icon: const Icon(
+                        Icons.edit_outlined,
+                        size: 16,
+                        color: _kBlue,
+                      ),
+                      label: const Text(
+                        'Edit',
+                        style: TextStyle(
+                          color: _kBlue,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: _kBlue),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _deleteSchedule(item.id),
+                      icon: const Icon(
+                        Icons.delete_outline,
+                        size: 16,
+                        color: Colors.red,
+                      ),
+                      label: const Text(
+                        'Delete',
+                        style: TextStyle(
+                          color: Colors.red,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: Colors.red.shade200),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            ],
+          ),
         ),
-      ),
     );
   }
 
@@ -1263,39 +1446,6 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
           color: color,
         ),
       ),
-    );
-  }
-
-  // ─── SWIPE ACTION DIALOG ───────────────────────────────────────────────────
-  Future<bool?> _showSwipeActionsDialog(ScheduleRecord item) async {
-    return await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Schedule Actions', style: TextStyle(fontWeight: FontWeight.bold)),
-          content: Text('What would you like to do with "${item.title}"?'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context, false);
-                _navigateToAddEdit(existing: item);
-              },
-              child: const Text('Edit', style: TextStyle(color: _kBlue)),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context, true);
-                _deleteSchedule(item.id);
-              },
-              child: const Text('Delete', style: TextStyle(color: Colors.red)),
-            ),
-          ],
-        );
-      },
     );
   }
 
@@ -1369,8 +1519,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                       child: Text(
                         item.allDay
                             ? '${DateFormat('EEEE, d MMMM yyyy').format(item.scheduleDateTime)} (All Day)'
-                            : '${df.format(item.scheduleDateTime)}' +
-                                (item.endDateTime != null ? ' - ${endDf.format(item.endDateTime!)}' : ''),
+                            : '${df.format(item.scheduleDateTime)}${item.endDateTime != null ? ' - ${endDf.format(item.endDateTime!)}' : ''}',
                         style: const TextStyle(fontSize: 14, color: _kTextDark, fontWeight: FontWeight.w500),
                       ),
                     ),

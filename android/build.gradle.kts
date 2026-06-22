@@ -15,9 +15,36 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
+
+subprojects {
+    afterEvaluate {
+        val androidExt = extensions.findByName("android")
+        if (androidExt != null) {
+            try {
+                val getNamespaceMethod = androidExt.javaClass.getMethod("getNamespace")
+                val namespace = getNamespaceMethod.invoke(androidExt)
+                if (namespace == null) {
+                    val setNamespaceMethod = androidExt.javaClass.getMethod("setNamespace", String::class.java)
+                    setNamespaceMethod.invoke(androidExt, project.group.toString())
+                }
+            } catch (e: Exception) {
+                // ignore if method doesn't exist
+            }
+        }
+    }
+}
 subprojects {
     project.evaluationDependsOn(":app")
+    
+    // Fix for "different roots" crash on Windows across drives
+    project.tasks.configureEach {
+        if (name.contains("generateDebugUnitTestConfig") || name.contains("generateReleaseUnitTestConfig")) {
+            enabled = false
+        }
+    }
 }
+
+
 
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
