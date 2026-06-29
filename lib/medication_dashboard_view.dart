@@ -1,14 +1,20 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:intl/intl.dart';
+import 'package:easy_localization/easy_localization.dart';
+import 'session_manager.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    hide NotificationVisibility;
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'main.dart';
+import 'dart:io';
+import 'package:image_picker/image_picker.dart';
 import 'schedule_dashboard_view.dart';
+import 'notification_dialogs.dart';
 
 // ─── colour tokens (matching app design system) ───────────────────────────────
 const _kPrimary = Color(0xFF51A77B);
@@ -67,8 +73,6 @@ Future<void> initMedicationNotifications() async {
       await Permission.scheduleExactAlarm.request();
     }
 
-
-
     final launchDetails = await _notifPlugin.getNotificationAppLaunchDetails();
     if (launchDetails != null && launchDetails.didNotificationLaunchApp) {
       final payload = launchDetails.notificationResponse?.payload;
@@ -89,6 +93,51 @@ Future<void> initMedicationNotifications() async {
   } catch (e) {
     debugPrint('Failed to initialize local notifications: $e');
   }
+}
+
+Future<void> _triggerNotificationAndOverlay(
+  int id,
+  String title,
+  String body,
+  String payload,
+) async {
+  // Show standard notification
+  await _notifPlugin.show(
+    id,
+    title,
+    body,
+    const NotificationDetails(
+      android: AndroidNotificationDetails(
+        'medication_channel',
+        'Medication Reminders',
+        channelDescription: 'Reminds you to take your medication',
+        importance: Importance.max,
+        priority: Priority.max,
+      ),
+      iOS: DarwinNotificationDetails(),
+    ),
+    payload: payload,
+  );
+
+  // Overlay window code removed due to crashes
+}
+
+Widget _buildMedPhoto(
+  String url, {
+  double? width,
+  double? height,
+  BoxFit fit = BoxFit.cover,
+}) {
+  if (url.startsWith('data:image')) {
+    final base64Str = url.split(',').last;
+    return Image.memory(
+      base64Decode(base64Str),
+      width: width,
+      height: height,
+      fit: fit,
+    );
+  }
+  return Image.network(url, width: width, height: height, fit: fit);
 }
 
 void _showDialogWhenReady(
@@ -177,6 +226,17 @@ void cancelAllMedicationReminders() {
   if (whenToTake == null || whenToTake.isEmpty || whenToTake == 'As needed') {
     return null;
   }
+
+  // 1. Try to find custom session time from SessionManager
+  try {
+    final session = SessionManager().sessions.firstWhere(
+      (s) => s.name.toLowerCase() == whenToTake.toLowerCase() || s.id.toLowerCase() == whenToTake.toLowerCase(),
+    );
+    return (session.time.hour, session.time.minute);
+  } catch (_) {
+    // Not found in custom sessions, fall back to defaults
+  }
+
   if (whenToTake == 'Morning') return (8, 0);
   if (whenToTake == 'Afternoon') return (12, 0);
   if (whenToTake == 'Evening') return (18, 0);
@@ -220,21 +280,11 @@ void scheduleMedicationReminder(Medication med) {
       debugPrint(
         'scheduleMedicationReminder: firing initial alert for ${med.name}',
       );
-      await _notifPlugin.show(
+      await _triggerNotificationAndOverlay(
         medId.hashCode,
         '💊 Time to take ${med.name}!',
         '${med.dosage ?? ""} — ${med.instruction ?? "as directed"}',
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'medication_channel',
-            'Medication Reminders',
-            channelDescription: 'Reminds you to take your medication',
-            importance: Importance.max,
-            priority: Priority.max,
-          ),
-          iOS: DarwinNotificationDetails(),
-        ),
-        payload: payload,
+        payload,
       );
       _startFollowUpTimer(
         medId,
@@ -281,8 +331,10 @@ void _scheduleNextFollowUp(
   String payload,
   int count,
 ) {
+  int intervalMins = 5; // Default High
+
   // Store the timer so cancelMedicationReminder can cancel it
-  _followUpTimers[medId] = Timer(const Duration(seconds: 60), () async {
+  _followUpTimers[medId] = Timer(Duration(minutes: intervalMins), () async {
     // Check if cancelled locally (deleted via app or marked taken)
     if (_cancelledAlerts[medId] == true) {
       _followUpTimers.remove(medId);
@@ -353,30 +405,14 @@ void _scheduleNextFollowUp(
     final nextCount = count + 1;
     debugPrint('_scheduleNextFollowUp: firing follow-up #$nextCount for $name');
 
-    // Use a rotating pool of 5 IDs so Android treats each as a new notification
-    final notifId =
-        medId.hashCode.abs() % 100000 + (nextCount % 5) * 100000 + 1;
-
     try {
-      await _notifPlugin.show(
-        notifId,
+      await _triggerNotificationAndOverlay(
+        medId.hashCode,
         '⚠️ Reminder: Take $name! (#$nextCount)',
         'You haven\'t logged it yet. Please take ${dosage ?? ""} ${instruction ?? "as directed"}.',
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'medication_channel',
-            'Medication Reminders',
-            channelDescription: 'Reminds you to take your medication',
-            importance: Importance.max,
-            priority: Priority.max,
-          ),
-          iOS: DarwinNotificationDetails(),
-        ),
-        payload: payload,
+        payload,
       );
-      debugPrint(
-        '_scheduleNextFollowUp: showed follow-up #$nextCount (id=$notifId)',
-      );
+      debugPrint('_scheduleNextFollowUp: showed follow-up #$nextCount');
     } catch (e) {
       debugPrint(
         '_scheduleNextFollowUp: ERROR showing follow-up #$nextCount: $e',
@@ -397,6 +433,18 @@ Future<void> syncAllMedicationReminders([List<Medication>? medications]) async {
     if (medications == null) {
       final uid = Supabase.instance.client.auth.currentUser?.id;
       if (uid == null) return;
+
+      // Do not schedule elderly-side medication alarms for caregivers.
+      // Caregivers get their own separate missed/low-stock alerts via SosNotificationService.
+      final userRes = await Supabase.instance.client
+          .from('users')
+          .select('role_id')
+          .eq('user_id', uid)
+          .maybeSingle();
+      if (userRes != null && userRes['role_id'] == 'caregiver') {
+        cancelAllMedicationReminders();
+        return;
+      }
 
       final schedRes = await Supabase.instance.client
           .from('schedule')
@@ -429,13 +477,89 @@ Future<void> syncAllMedicationReminders([List<Medication>? medications]) async {
       'syncAllMedicationReminders: syncing ${meds.length} medications (${staleIds.length} stale removed)...',
     );
 
+    final uid = Supabase.instance.client.auth.currentUser?.id;
+    final todayStr = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
     for (final med in meds) {
-      // Skip if already actively following up — don't restart the timer
-      if (_followUpTimers.containsKey(med.id)) {
-        debugPrint('  → ${med.name}: follow-up already active, skipping');
-        continue;
+      final isExpired = med.expirationDate != null && med.expirationDate!.isBefore(todayStr);
+
+      if (isExpired) {
+        debugPrint('  → ${med.name}: expired, skipping reminder');
+        cancelMedicationReminder(med.id);
+      } else {
+        // Skip if already actively following up — don't restart the timer
+        if (_followUpTimers.containsKey(med.id)) {
+          debugPrint('  → ${med.name}: follow-up already active, skipping');
+        } else {
+          scheduleMedicationReminder(med);
+        }
       }
-      scheduleMedicationReminder(med);
+
+      // Check Expiration / Low Stock
+      if (uid != null) {
+        bool shouldAlert = false;
+        String msg = '';
+        if (med.stock != null && med.stock! < 5) {
+          shouldAlert = true;
+          msg =
+              'Low Stock: ${med.name} (${med.stock} ${med.stockUnit ?? "left"})';
+        } else if (med.expirationDate != null) {
+          final diff = med.expirationDate!.difference(DateTime.now()).inDays;
+          if (diff < 0) {
+            shouldAlert = true;
+            msg = 'Expired Medicine: ${med.name}';
+          } else if (diff <= 7) {
+            shouldAlert = true;
+            msg = 'Expiring Soon: ${med.name}';
+          }
+        }
+
+        if (shouldAlert) {
+          try {
+            final nowStr = DateTime.now().toUtc().toIso8601String().substring(
+              0,
+              10,
+            );
+
+            // Check if caregiver alert already sent today
+            final caregiverRes = await Supabase.instance.client
+                .from('care_link')
+                .select('link_id, caregiver_id')
+                .eq('elderly_id', uid)
+                .maybeSingle();
+
+            if (caregiverRes != null) {
+              final alertExists = await Supabase.instance.client
+                  .from('emergency_logs')
+                  .select('alert_id')
+                  .eq('link_id', caregiverRes['link_id'])
+                  .eq('status', msg)
+                  .gte('timestamp', nowStr)
+                  .maybeSingle();
+
+              if (alertExists == null) {
+                // Notify Caregiver
+                await Supabase.instance.client.from('emergency_logs').insert({
+                  'link_id': caregiverRes['link_id'],
+                  'status': msg,
+                  'location': 'Medicine Expiration/Stock',
+                  'caregiver_id': caregiverRes['caregiver_id'],
+                  'timestamp': DateTime.now().toUtc().toIso8601String(),
+                });
+
+                // Notify Elderly (only once a day, aligned with caregiver insert)
+                await _triggerNotificationAndOverlay(
+                  msg.hashCode,
+                  '⚠️ Medicine Alert',
+                  msg,
+                  'alert|$msg',
+                );
+              }
+            }
+          } catch (e) {
+            debugPrint('Error pushing alert for ${med.name}: $e');
+          }
+        }
+      }
     }
 
     debugPrint('syncAllMedicationReminders: done.');
@@ -478,8 +602,8 @@ void showMedicationReminderDialog(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  'Time To Take Medicine !',
+                Text(
+                  'Time To Take Medicine !'.tr(),
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: 'League Spartan',
@@ -488,7 +612,7 @@ void showMedicationReminderDialog(
                     color: Color(0xFF27252E),
                   ),
                 ),
-                const SizedBox(height: 24),
+                SizedBox(height: 24),
                 Container(
                   width: 120,
                   height: 120,
@@ -509,7 +633,7 @@ void showMedicationReminderDialog(
                     color: Colors.white,
                   ),
                 ),
-                const SizedBox(height: 24),
+                SizedBox(height: 24),
                 Text(
                   name,
                   textAlign: TextAlign.center,
@@ -519,19 +643,19 @@ void showMedicationReminderDialog(
                     color: Color(0xFF27252E),
                   ),
                 ),
-                const SizedBox(height: 6),
+                SizedBox(height: 6),
                 Text(
                   dosage,
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
                 ),
-                const SizedBox(height: 6),
+                SizedBox(height: 6),
                 Text(
                   instruction,
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
                 ),
-                const SizedBox(height: 32),
+                SizedBox(height: 32),
                 Row(
                   children: [
                     Expanded(
@@ -561,8 +685,8 @@ void showMedicationReminderDialog(
                           padding: const EdgeInsets.symmetric(vertical: 14),
                           elevation: 0,
                         ),
-                        child: const Text(
-                          'I have taken',
+                        child: Text(
+                          'I have taken'.tr(),
                           style: TextStyle(
                             fontSize: 16,
                             color: Colors.white,
@@ -571,7 +695,7 @@ void showMedicationReminderDialog(
                         ),
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    SizedBox(width: 12),
                     Expanded(
                       child: OutlinedButton(
                         onPressed: () async {
@@ -585,27 +709,15 @@ void showMedicationReminderDialog(
                             // Re-mark as not cancelled so follow-ups can run again
                             _cancelledAlerts[medId] = false;
                             // Show the snooze notification
-                            await _notifPlugin.show(
+                            await _triggerNotificationAndOverlay(
                               medId.hashCode,
                               '💊 Reminder: Time to take $name!',
                               '${dosage.isNotEmpty ? dosage : "Take"} — $instruction',
-                              const NotificationDetails(
-                                android: AndroidNotificationDetails(
-                                  'medication_channel',
-                                  'Medication Reminders',
-                                  channelDescription:
-                                      'Reminds you to take your medication',
-                                  importance: Importance.max,
-                                  priority: Priority.max,
-                                ),
-                                iOS: DarwinNotificationDetails(),
-                              ),
-                              payload: '$medId|$name|$dosage|$instruction',
+                              '$medId|$name|$dosage|$instruction',
                             );
                             debugPrint(
                               'Remind Later: snooze fired for $name, restarting follow-ups',
                             );
-                            // Restart follow-up chain so it keeps reminding every 60s
                             _startFollowUpTimer(
                               medId,
                               name,
@@ -622,8 +734,8 @@ void showMedicationReminderDialog(
                           ),
                           padding: const EdgeInsets.symmetric(vertical: 14),
                         ),
-                        child: const Text(
-                          'Remind Later',
+                        child: Text(
+                          'Remind Later'.tr(),
                           style: TextStyle(
                             fontSize: 16,
                             color: Color(0xFF27252E),
@@ -648,22 +760,11 @@ Future<void> showMedicationReminder({
   required String dosage,
   required String instruction,
 }) async {
-  const androidDetails = AndroidNotificationDetails(
-    'medication_channel',
-    'Medication Reminders',
-    channelDescription: 'Reminds you to take your medication',
-    importance: Importance.high,
-    priority: Priority.high,
-    styleInformation: BigTextStyleInformation(''),
-  );
-  await _notifPlugin.show(
+  await _triggerNotificationAndOverlay(
     name.hashCode,
     '💊 Time To Take Medicine!',
     '$name — $dosage. $instruction',
-    const NotificationDetails(
-      android: androidDetails,
-      iOS: DarwinNotificationDetails(),
-    ),
+    '',
   );
 }
 
@@ -678,8 +779,8 @@ class Medication {
   final String? notes;
   final String? scheduleId;
   final DateTime? expirationDate;
-  final String? priority;
   final String? photo;
+  final String? stockUnit;
 
   Medication({
     required this.id,
@@ -691,25 +792,37 @@ class Medication {
     this.notes,
     this.scheduleId,
     this.expirationDate,
-    this.priority,
     this.photo,
+    this.stockUnit,
   });
 
-  factory Medication.fromMap(Map<String, dynamic> m) => Medication(
-    id: m['medication_id']?.toString() ?? '',
-    name: m['medication_name']?.toString() ?? '',
-    dosage: m['dosage']?.toString(),
-    whenToTake: m['when_to_take']?.toString(),
-    instruction: m['instruction']?.toString(),
-    stock: m['medication_stock'] != null ? int.tryParse(m['medication_stock'].toString()) : null,
-    notes: m['medical_notes']?.toString(),
-    scheduleId: m['schedule_id']?.toString(),
-    expirationDate: m['expiration_date'] != null
-        ? DateTime.tryParse(m['expiration_date'].toString())
-        : null,
-    priority: m['priority']?.toString(),
-    photo: m['photo']?.toString(),
-  );
+  factory Medication.fromMap(Map<String, dynamic> m) {
+    String? rawNotes = m['medical_notes']?.toString();
+    String? sUnit;
+    if (rawNotes != null && rawNotes.contains('|stock_unit:')) {
+      final parts = rawNotes.split('|stock_unit:');
+      rawNotes = parts[0];
+      sUnit = parts[1];
+    }
+
+    return Medication(
+      id: m['medication_id']?.toString() ?? '',
+      name: m['medication_name']?.toString() ?? '',
+      dosage: m['dosage']?.toString(),
+      whenToTake: m['when_to_take']?.toString(),
+      instruction: m['instruction']?.toString(),
+      stock: m['medication_stock'] != null
+          ? int.tryParse(m['medication_stock'].toString())
+          : null,
+      notes: rawNotes,
+      scheduleId: m['schedule_id']?.toString(),
+      expirationDate: m['expiration_date'] != null
+          ? DateTime.tryParse(m['expiration_date'].toString())
+          : null,
+      photo: m['photo']?.toString(),
+      stockUnit: sUnit,
+    );
+  }
 }
 
 // ─── Medication Log model ─────────────────────────────────────────────────────
@@ -732,7 +845,14 @@ class MedicationLog {
     id: m['log_id']?.toString() ?? '',
     medicationId: m['medication_id']?.toString() ?? '',
     status: m['status']?.toString() ?? '',
-    loggedAt: m['logged_at'] != null ? DateTime.tryParse(m['logged_at'].toString())?.toLocal() ?? DateTime.now() : DateTime.now(),
+    loggedAt: () {
+      if (m['logged_at'] != null) {
+        String s = m['logged_at'].toString();
+        if (!s.endsWith('Z')) s += 'Z';
+        return DateTime.tryParse(s)?.toLocal() ?? DateTime.now();
+      }
+      return DateTime.now();
+    }(),
   );
 }
 
@@ -742,7 +862,11 @@ class MedicationLog {
 class MedicationDashboardView extends StatefulWidget {
   final String? elderlyId;
   final bool isStandalone;
-  const MedicationDashboardView({super.key, this.elderlyId, this.isStandalone = false});
+  const MedicationDashboardView({
+    super.key,
+    this.elderlyId,
+    this.isStandalone = false,
+  });
   @override
   State<MedicationDashboardView> createState() =>
       _MedicationDashboardViewState();
@@ -754,6 +878,84 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
   List<MedicationLog> _actualTodayLogs = [];
   bool _loading = true;
   DateTime _selectedLogDate = DateTime.now();
+  bool _expiredPromptShown = false;
+
+  Map<String, List<Medication>> get _groupedMeds {
+    final map = <String, List<Medication>>{};
+    for (final med in _medications) {
+      final session = med.whenToTake ?? 'Other';
+      if (map[session] != null) {
+        bool exists = map[session]!.any((m) => m.name == med.name);
+        if (exists) continue;
+      }
+      map.putIfAbsent(session, () => []).add(med);
+    }
+    return map;
+  }
+
+  List<Medication> get _expiredMeds {
+    final today = DateTime.now();
+    final todayStr = DateTime(today.year, today.month, today.day);
+    final expired = <Medication>[];
+    final seen = <String>{};
+    for (final m in _medications) {
+      if (m.expirationDate == null) continue;
+      if (m.expirationDate!.isBefore(todayStr)) {
+        final key = m.name.trim().toLowerCase();
+        if (!seen.contains(key)) {
+          seen.add(key);
+          expired.add(m);
+        }
+      }
+    }
+    return expired;
+  }
+
+  void _showExpiredMedsDialog(List<String> meds) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          title: Row(
+            children: [
+              const Icon(
+                Icons.warning_amber_rounded,
+                color: Colors.red,
+                size: 28,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Expired Medication!'.tr(),
+                style: const TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+            ],
+          ),
+          content: Text(
+            '${'Please stop taking the following expired medications immediately:'.tr()}\n\n• ${meds.join('\n• ')}',
+            style: const TextStyle(fontSize: 16),
+          ),
+          actions: [
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('I Understand'.tr()),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   @override
   void initState() {
@@ -777,23 +979,28 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
 
       final now = DateTime.now();
       final List<String> scheduleIds = [];
-      
+
       for (var s in schedRes as List) {
         try {
           final record = ScheduleRecord.fromMap(s as Map<String, dynamic>);
           bool isToday = false;
-          if (record.scheduleDateTime.year == now.year &&
+          // Medication schedules (title starts with 'Take') always show daily
+          if (record.title.trim().toLowerCase().startsWith('take ')) {
+            isToday = true;
+          } else if (record.scheduleDateTime.year == now.year &&
               record.scheduleDateTime.month == now.month &&
               record.scheduleDateTime.day == now.day) {
             isToday = true;
           } else if (record.repeatFrequency == 'Daily') {
             isToday = true;
-          } else if (record.repeatFrequency == 'Weekly' && record.scheduleDateTime.weekday == now.weekday) {
+          } else if (record.repeatFrequency == 'Weekly' &&
+              record.scheduleDateTime.weekday == now.weekday) {
             isToday = true;
-          } else if (record.repeatFrequency == 'Monthly' && record.scheduleDateTime.day == now.day) {
+          } else if (record.repeatFrequency == 'Monthly' &&
+              record.scheduleDateTime.day == now.day) {
             isToday = true;
           }
-          
+
           if (isToday) {
             scheduleIds.add(record.id);
           }
@@ -814,14 +1021,18 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
       }
 
       // Load selected date's logs
-      final start = DateTime(_selectedLogDate.year, _selectedLogDate.month, _selectedLogDate.day);
+      final start = DateTime(
+        _selectedLogDate.year,
+        _selectedLogDate.month,
+        _selectedLogDate.day,
+      );
       final end = start.add(const Duration(days: 1));
 
       List<MedicationLog> logs = [];
       List<MedicationLog> actualTodayLogsList = [];
       if (meds.isNotEmpty) {
         final medIds = meds.map((m) => m.id).toList();
-        
+
         // Fetch logs for the selected date
         final logRes = await Supabase.instance.client
             .from('medication_logs')
@@ -833,7 +1044,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
         logs = (logRes as List)
             .map((l) => MedicationLog.fromMap(l as Map<String, dynamic>))
             .toList();
-            
+
         // Fetch logs for ACTUAL today (for the checkboxes in "Today's Medicine")
         final actualStart = DateTime(now.year, now.month, now.day);
         final actualEnd = actualStart.add(const Duration(days: 1));
@@ -862,12 +1073,25 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
           _loading = false;
         });
         syncAllMedicationReminders(meds);
+
+        final expired = _expiredMeds;
+        if (expired.isNotEmpty && !_expiredPromptShown) {
+          _expiredPromptShown = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _showExpiredMedsDialog(expired.map((e) => e.name).toList());
+          });
+        }
       }
     } catch (e) {
       debugPrint('Medication load error: $e');
       if (mounted) {
         setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Load Meds Error: $e'), backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Load Meds Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     }
   }
@@ -877,8 +1101,9 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
       await Supabase.instance.client.from('medication_logs').insert({
         'medication_id': med.id,
         'status': 'taken',
+        'logged_at': DateTime.now().toUtc().toIso8601String(),
       });
-      
+
       // 1. Auto recount stock
       if (med.stock != null && med.stock! > 0) {
         int takenAmount = 1;
@@ -888,11 +1113,33 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
         }
         int newStock = med.stock! - takenAmount;
         if (newStock < 0) newStock = 0;
-        await Supabase.instance.client.from('medications').update({
-          'medication_stock': newStock,
-        }).eq('medication_id', med.id);
+
+        final uid =
+            widget.elderlyId ?? Supabase.instance.client.auth.currentUser?.id;
+        if (uid != null) {
+          final checkSchedRes = await Supabase.instance.client
+              .from('schedule')
+              .select('schedule_id')
+              .eq('elderly_id', uid);
+          final elderlySchedIds = (checkSchedRes as List)
+              .map((s) => s['schedule_id'])
+              .toList();
+
+          if (elderlySchedIds.isNotEmpty) {
+            await Supabase.instance.client
+                .from('medications')
+                .update({'medication_stock': newStock})
+                .eq('medication_name', med.name)
+                .inFilter('schedule_id', elderlySchedIds);
+          }
+        } else {
+          await Supabase.instance.client
+              .from('medications')
+              .update({'medication_stock': newStock})
+              .eq('medication_id', med.id);
+        }
       }
-      
+
       // 2. Mark schedule as done or advance for recurring
       if (med.scheduleId != null) {
         final schedRes = await Supabase.instance.client
@@ -900,11 +1147,11 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
             .select()
             .eq('schedule_id', med.scheduleId!)
             .maybeSingle();
-            
+
         if (schedRes != null) {
           final oldNotes = schedRes['notes'] as String? ?? '';
           final meta = ScheduleMetadata.fromNotes(oldNotes);
-          
+
           final newNotes = ScheduleMetadata.toNotesString(
             notesText: meta.notesText,
             type: meta.scheduleType,
@@ -916,7 +1163,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
             repeat: meta.repeatFrequency,
             photoUrl: meta.photoUrl,
           );
-          
+
           await Supabase.instance.client
               .from('schedule')
               .update({'notes': newNotes})
@@ -925,10 +1172,14 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
       }
 
       // Cancel all pending follow-up reminders and snooze
-      for (int i = 1; i <= 10; i++) {
-        await _notifPlugin.cancel(med.id.hashCode + (i * 1000));
+      cancelMedicationReminder(med.id);
+      await _notifPlugin.cancel(med.id.hashCode);
+      for (int i = 0; i <= 5; i++) {
+        await _notifPlugin.cancel(
+          med.id.hashCode.abs() % 100000 + (i % 5) * 100000 + 1,
+        );
       }
-      await _notifPlugin.cancel(med.id.hashCode + 999);
+
       _load();
     } catch (e) {
       if (mounted) {
@@ -960,9 +1211,9 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildHeader(),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
             if (_loading)
-              const Center(
+              Center(
                 child: Padding(
                   padding: EdgeInsets.all(40),
                   child: CircularProgressIndicator(color: _kPrimary),
@@ -970,7 +1221,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
               )
             else ...[
               _buildTodaySection(),
-              const SizedBox(height: 28),
+              SizedBox(height: 28),
               _buildLogSection(),
             ],
           ],
@@ -988,8 +1239,8 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
             icon: const Icon(Icons.arrow_back, color: _kTextDark),
             onPressed: () => Navigator.pop(context),
           ),
-          title: const Text(
-            'Medication',
+          title: Text(
+            'Medication'.tr(),
             style: TextStyle(
               fontFamily: 'League Spartan',
               fontWeight: FontWeight.w900,
@@ -1016,8 +1267,8 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'Medication',
+              Text(
+                'Medication'.tr(),
                 style: TextStyle(
                   fontFamily: 'League Spartan',
                   fontSize: 28,
@@ -1046,8 +1297,8 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                "Today's Medicine",
+              Text(
+                "Today's Medicine".tr(),
                 style: TextStyle(
                   fontFamily: 'League Spartan',
                   fontSize: 22,
@@ -1059,11 +1310,12 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => ManageMedicineScreen(elderlyId: widget.elderlyId),
+                    builder: (_) =>
+                        ManageMedicineScreen(elderlyId: widget.elderlyId),
                   ),
                 ).then((_) => _load()),
-                child: const Text(
-                  'View All',
+                child: Text(
+                  'View All'.tr(),
                   style: TextStyle(
                     fontSize: 16,
                     color: _kPrimary,
@@ -1073,24 +1325,169 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
               ),
             ],
           ),
-          const SizedBox(height: 16),
+          SizedBox(height: 16),
+
+          if (_expiredMeds.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.red.shade200),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.warning_rounded,
+                    color: Colors.red,
+                    size: 28,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Expired Medication Warning'.tr(),
+                          style: const TextStyle(
+                            fontSize: 15,
+                            color: Colors.red,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${'Do not consume:'.tr()} ${_expiredMeds.map((e) => e.name).join(', ')}',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.red.shade700,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (_medications.isEmpty)
             _buildNoMedicineCard()
           else ...[
-            ..._medications.map((med) => _buildMedicineCard(med)),
+            ...SessionManager().sessions.map((session) {
+              final grouped = _groupedMeds;
+              final medsForSession = grouped[session.name] ?? [];
+              final fallback = grouped[session.id] ?? [];
+              final fallbackLower = grouped[session.name.toLowerCase()] ?? [];
+              final allMeds = {
+                ...medsForSession,
+                ...fallback,
+                ...fallbackLower,
+              }.toList();
+
+              if (allMeds.isEmpty) return const SizedBox.shrink();
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0, bottom: 12.0),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.wb_sunny_outlined,
+                          size: 20,
+                          color: _kBlue,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${session.name} Session (${session.time.hour.toString().padLeft(2, '0')}:${session.time.minute.toString().padLeft(2, '0')})'
+                              .tr(),
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: _kBlue,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ...allMeds.map((med) => _buildMedicineCard(med)),
+                ],
+              );
+            }),
+
+            Builder(
+              builder: (ctx) {
+                final manager = SessionManager();
+                final grouped = _groupedMeds;
+                final knownSessions =
+                    manager.sessions.map((s) => s.name).toSet()
+                      ..addAll(manager.sessions.map((s) => s.id))
+                      ..addAll(
+                        manager.sessions.map((s) => s.name.toLowerCase()),
+                      );
+
+                final otherKeys = grouped.keys
+                    .where((k) => !knownSessions.contains(k))
+                    .toList();
+                if (otherKeys.isEmpty) return const SizedBox.shrink();
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: otherKeys.map((k) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(
+                            top: 8.0,
+                            bottom: 12.0,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.more_time_rounded,
+                                size: 20,
+                                color: Colors.grey.shade600,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                k.tr(),
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.grey.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        ...grouped[k]!.map((med) => _buildMedicineCard(med)),
+                      ],
+                    );
+                  }).toList(),
+                );
+              },
+            ),
+
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
                 onPressed: () => Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => AddEditMedicineScreen(elderlyId: widget.elderlyId),
+                    builder: (_) =>
+                        AddEditMedicineScreen(elderlyId: widget.elderlyId),
                   ),
                 ).then((_) => _load()),
                 icon: const Icon(Icons.add, size: 20),
-                label: const Text(
-                  'Add Medicine',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                label: Text(
+                  'Add Medicine'.tr(),
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: _kPrimary,
@@ -1124,29 +1521,35 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
             size: 56,
             color: Colors.grey.shade300,
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: 12),
           Text(
-            'No medicines added',
+            'No medicines added'.tr(),
             style: TextStyle(
               fontSize: 18,
               color: Colors.grey.shade500,
               fontWeight: FontWeight.w600,
             ),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8),
           Text(
-            'Tap "Manage" to add your medications',
+            'Tap "Manage" to add your medications'.tr(),
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 16, color: Colors.grey.shade400),
           ),
-          const SizedBox(height: 20),
+          SizedBox(height: 20),
           ElevatedButton.icon(
             onPressed: () => Navigator.push(
               context,
-              MaterialPageRoute(builder: (_) => ManageMedicineScreen(elderlyId: widget.elderlyId)),
+              MaterialPageRoute(
+                builder: (_) =>
+                    ManageMedicineScreen(elderlyId: widget.elderlyId),
+              ),
             ).then((_) => _load()),
             icon: const Icon(Icons.add, size: 18),
-            label: const Text('Add Medicine', style: TextStyle(fontSize: 16)),
+            label: Text(
+              'Add Medicine'.tr(),
+              style: const TextStyle(fontSize: 16),
+            ),
             style: ElevatedButton.styleFrom(
               backgroundColor: _kPrimary,
               foregroundColor: Colors.white,
@@ -1162,21 +1565,42 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
 
   Widget _buildMedicineCard(Medication med) {
     final taken = _takenTodayIds.contains(med.id);
+
+    final today = DateTime.now();
+    final todayStr = DateTime(today.year, today.month, today.day);
+    final isExpired =
+        med.expirationDate != null && med.expirationDate!.isBefore(todayStr);
+    final isAlmostExpired =
+        !isExpired &&
+        med.expirationDate != null &&
+        med.expirationDate!.difference(todayStr).inDays <= 7;
+
     return GestureDetector(
       onTap: () => Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => MedicineDetailScreen(medication: med, elderlyId: widget.elderlyId),
+          builder: (_) => MedicineDetailScreen(
+            medication: med,
+            elderlyId: widget.elderlyId,
+          ),
         ),
       ).then((_) => _load()),
       child: Container(
         margin: const EdgeInsets.only(bottom: 16),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: _kCard,
+          color: isExpired
+              ? Colors.red.shade50
+              : (isAlmostExpired ? Colors.orange.shade50 : _kCard),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: taken ? _kPrimary.withOpacity(0.3) : Colors.grey.shade200,
+            color: isExpired
+                ? Colors.red.shade300
+                : (isAlmostExpired
+                      ? Colors.orange.shade300
+                      : (taken
+                            ? _kPrimary.withOpacity(0.3)
+                            : Colors.grey.shade200)),
           ),
           boxShadow: [
             BoxShadow(
@@ -1189,6 +1613,39 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (isExpired || isAlmostExpired)
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: isExpired ? Colors.red : Colors.orange,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isExpired
+                          ? Icons.warning_amber_rounded
+                          : Icons.info_outline_rounded,
+                      color: Colors.white,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      (isExpired ? 'EXPIRED MEDICINE' : 'ALMOST EXPIRED').tr(),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             Row(
               children: [
                 Container(
@@ -1198,13 +1655,18 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                     color: _kBlue,
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(
-                    Icons.medication_rounded,
-                    color: Colors.white,
-                    size: 28,
-                  ),
+                  child: med.photo != null
+                      ? ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: _buildMedPhoto(med.photo!, fit: BoxFit.cover),
+                        )
+                      : const Icon(
+                          Icons.medication_rounded,
+                          color: Colors.white,
+                          size: 28,
+                        ),
                 ),
-                const SizedBox(width: 14),
+                SizedBox(width: 14),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1238,9 +1700,9 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                       color: _kPrimary.withOpacity(0.12),
                       borderRadius: BorderRadius.circular(20),
                     ),
-                    child: const Text(
-                      'Taken ✓',
-                      style: TextStyle(
+                    child: Text(
+                      'Taken ✓'.tr(),
+                      style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.bold,
                         color: _kPrimary,
@@ -1259,7 +1721,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                       size: 18,
                       color: Colors.grey.shade400,
                     ),
-                    const SizedBox(width: 4),
+                    SizedBox(width: 4),
                     Text(
                       _formatWhenToTake(med.whenToTake, context),
                       style: TextStyle(
@@ -1267,7 +1729,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                         color: Colors.grey.shade600,
                       ),
                     ),
-                    const SizedBox(width: 14),
+                    SizedBox(width: 14),
                   ],
                   if (med.instruction != null) ...[
                     Icon(
@@ -1275,7 +1737,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                       size: 18,
                       color: Colors.grey.shade400,
                     ),
-                    const SizedBox(width: 4),
+                    SizedBox(width: 4),
                     Text(
                       med.instruction!,
                       style: TextStyle(
@@ -1288,16 +1750,34 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
               ),
             ],
             if (!taken) ...[
-              const SizedBox(height: 14),
+              SizedBox(height: 14),
               Row(
                 children: [
                   Expanded(
                     child: ElevatedButton.icon(
-                      onPressed: () => _markTaken(med),
+                      onPressed: () async {
+                        if (isExpired) {
+                          await NotificationDialogs.showExpiredAlert(
+                            context,
+                            medName: med.name,
+                          );
+                          return;
+                        } else if (isAlmostExpired) {
+                          final bool?
+                          proceed = await NotificationDialogs.showAllergyAlert(
+                            context,
+                            title: 'Expiration Alert',
+                            description:
+                                '${med.name} will expire soon. Do you still want to take it?',
+                          );
+                          if (proceed != true) return;
+                        }
+                        _markTaken(med);
+                      },
                       icon: const Icon(Icons.check_circle_outline, size: 20),
-                      label: const Text(
-                        'I have taken',
-                        style: TextStyle(fontSize: 16),
+                      label: Text(
+                        'I have taken'.tr(),
+                        style: const TextStyle(fontSize: 16),
                       ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: _kPrimary,
@@ -1310,13 +1790,16 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 10),
+                  SizedBox(width: 10),
                   Expanded(
                     child: OutlinedButton(
                       onPressed: () => Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => MedicineDetailScreen(medication: med, elderlyId: widget.elderlyId),
+                          builder: (_) => MedicineDetailScreen(
+                            medication: med,
+                            elderlyId: widget.elderlyId,
+                          ),
                         ),
                       ).then((_) => _load()),
                       style: OutlinedButton.styleFrom(
@@ -1326,9 +1809,9 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                         ),
                         padding: const EdgeInsets.symmetric(vertical: 10),
                       ),
-                      child: const Text(
-                        'Details',
-                        style: TextStyle(color: _kTextGrey, fontSize: 16),
+                      child: Text(
+                        'Details'.tr(),
+                        style: const TextStyle(color: _kTextGrey, fontSize: 16),
                       ),
                     ),
                   ),
@@ -1343,18 +1826,24 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
 
   // ─── Log Section ───────────────────────────────────────────────────────────
   Widget _buildLogSection() {
-    final takenLogs = _selectedDateLogs.where((l) => l.status == 'taken').toList();
+    final takenLogs = _selectedDateLogs
+        .where((l) => l.status == 'taken')
+        .toList();
     final takenMedIds = takenLogs.map((l) => l.medicationId).toSet();
-    final missedLogs = _selectedDateLogs.where((l) => l.status == 'missed' && !takenMedIds.contains(l.medicationId)).toList();
+    final missedLogs = _selectedDateLogs
+        .where(
+          (l) => l.status == 'missed' && !takenMedIds.contains(l.medicationId),
+        )
+        .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: const Text(
-            'Medication Log',
-            style: TextStyle(
+          child: Text(
+            'Medication Log'.tr(),
+            style: const TextStyle(
               fontFamily: 'League Spartan',
               fontSize: 22,
               fontWeight: FontWeight.bold,
@@ -1362,7 +1851,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
             ),
           ),
         ),
-        const SizedBox(height: 14),
+        SizedBox(height: 14),
 
         // Date selector
         Padding(
@@ -1373,7 +1862,11 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
               IconButton(
                 icon: const Icon(Icons.chevron_left, color: _kTextDark),
                 onPressed: () {
-                  setState(() => _selectedLogDate = _selectedLogDate.subtract(const Duration(days: 1)));
+                  setState(
+                    () => _selectedLogDate = _selectedLogDate.subtract(
+                      const Duration(days: 1),
+                    ),
+                  );
                   _load();
                 },
               ),
@@ -1404,7 +1897,10 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                     }
                   },
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.grey.shade200,
                       borderRadius: BorderRadius.circular(20),
@@ -1412,11 +1908,17 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(Icons.calendar_month, size: 16, color: _kPrimary),
-                        const SizedBox(width: 8),
+                        const Icon(
+                          Icons.calendar_month,
+                          size: 16,
+                          color: _kPrimary,
+                        ),
+                        SizedBox(width: 8),
                         Flexible(
                           child: Text(
-                            DateFormat('EEEE, d MMM yyyy').format(_selectedLogDate),
+                            DateFormat(
+                              'EEEE, d MMM yyyy',
+                            ).format(_selectedLogDate),
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontSize: 15,
@@ -1433,21 +1935,25 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
               IconButton(
                 icon: const Icon(Icons.chevron_right, color: _kTextDark),
                 onPressed: () {
-                  setState(() => _selectedLogDate = _selectedLogDate.add(const Duration(days: 1)));
+                  setState(
+                    () => _selectedLogDate = _selectedLogDate.add(
+                      const Duration(days: 1),
+                    ),
+                  );
                   _load();
                 },
               ),
             ],
           ),
         ),
-        const SizedBox(height: 20),
+        SizedBox(height: 20),
 
         if (_selectedDateLogs.isEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Center(
               child: Text(
-                'No logs for this period',
+                'No logs for this period'.tr(),
                 style: TextStyle(color: Colors.grey.shade400),
               ),
             ),
@@ -1456,8 +1962,8 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
           if (missedLogs.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: const Text(
-                'Missed Doses',
+              child: Text(
+                'Missed Doses'.tr(),
                 style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
@@ -1465,15 +1971,15 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
+            SizedBox(height: 8),
             ...missedLogs.map((l) => _buildLogCard(l, isMissed: true)),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
           ],
           if (takenLogs.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: const Text(
-                'Taken Doses',
+              child: Text(
+                'Taken Doses'.tr(),
                 style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
@@ -1481,7 +1987,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
+            SizedBox(height: 8),
             ...takenLogs.map((l) => _buildLogCard(l, isMissed: false)),
           ],
         ],
@@ -1520,7 +2026,7 @@ class _MedicationDashboardViewState extends State<MedicationDashboardView> {
                   size: 20,
                 ),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: 12),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1575,7 +2081,12 @@ class ManageMedicineScreen extends StatefulWidget {
 }
 
 class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
+  // Deduplicated list — one entry per unique medication name
   List<Medication> _medications = [];
+  // Map: medication name -> all sessions it's assigned to
+  Map<String, List<String>> _medSessions = {};
+  // Map: medication name -> all medication IDs (for delete-all)
+  Map<String, List<String>> _medIds = {};
   bool _loading = true;
 
   @override
@@ -1587,7 +2098,8 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final uid = widget.elderlyId ?? Supabase.instance.client.auth.currentUser?.id;
+      final uid =
+          widget.elderlyId ?? Supabase.instance.client.auth.currentUser?.id;
       if (uid == null) return;
       final schedRes = await Supabase.instance.client
           .from('schedule')
@@ -1596,19 +2108,40 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
       final ids = (schedRes as List)
           .map((s) => s['schedule_id']?.toString() ?? '')
           .toList();
-      List<Medication> meds = [];
+      List<Medication> allMeds = [];
       if (ids.isNotEmpty) {
         final medRes = await Supabase.instance.client
             .from('medications')
             .select()
             .inFilter('schedule_id', ids);
-        meds = (medRes as List)
+        allMeds = (medRes as List)
             .map((m) => Medication.fromMap(m as Map<String, dynamic>))
             .toList();
       }
+
+      // Group by medication name — deduplicate for display
+      final Map<String, Medication> uniqueByName = {};
+      final Map<String, List<String>> sessionsMap = {};
+      final Map<String, List<String>> idsMap = {};
+      for (final med in allMeds) {
+        final key = med.name.trim().toLowerCase();
+        uniqueByName.putIfAbsent(key, () => med);
+        sessionsMap.putIfAbsent(key, () => []);
+        idsMap.putIfAbsent(key, () => []);
+        final session = med.whenToTake;
+        if (session != null &&
+            session.isNotEmpty &&
+            !sessionsMap[key]!.contains(session)) {
+          sessionsMap[key]!.add(session);
+        }
+        idsMap[key]!.add(med.id);
+      }
+
       if (mounted) {
         setState(() {
-          _medications = meds;
+          _medications = uniqueByName.values.toList();
+          _medSessions = {for (final e in sessionsMap.entries) e.key: e.value};
+          _medIds = {for (final e in idsMap.entries) e.key: e.value};
           _loading = false;
         });
       }
@@ -1616,9 +2149,9 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
       debugPrint('ManageMedicine _load Error: $e\n$stack');
       if (mounted) {
         setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-           SnackBar(content: Text('Error loading meds: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error loading meds: $e')));
       }
     }
   }
@@ -1627,35 +2160,45 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Delete Medicine'),
+        title: Text('Delete Medicine'.tr()),
         content: Text('Delete "${med.name}"?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text('Cancel'.tr()),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            child: Text('Delete'.tr(), style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
     );
     if (ok == true) {
-      if (med.scheduleId != null) {
-        try {
-          await Supabase.instance.client
-              .from('schedule')
-              .delete()
-              .eq('schedule_id', med.scheduleId!);
-        } catch (e) {
-          debugPrint('Error deleting linked schedule: $e');
+      // Delete ALL session records for this medicine name
+      final key = med.name.trim().toLowerCase();
+      final idsToDelete = _medIds[key] ?? [med.id];
+      for (final id in idsToDelete) {
+        // Find and delete the linked schedule if any
+        final targetMed = _medications.firstWhere(
+          (m) => m.id == id,
+          orElse: () => med,
+        );
+        if (targetMed.scheduleId != null) {
+          try {
+            await Supabase.instance.client
+                .from('schedule')
+                .delete()
+                .eq('schedule_id', targetMed.scheduleId!);
+          } catch (e) {
+            debugPrint('Error deleting linked schedule: $e');
+          }
         }
+        await Supabase.instance.client
+            .from('medications')
+            .delete()
+            .eq('medication_id', id);
       }
-      await Supabase.instance.client
-          .from('medications')
-          .delete()
-          .eq('medication_id', med.id);
       _load();
     }
   }
@@ -1671,8 +2214,8 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
           icon: const Icon(Icons.arrow_back, color: _kTextDark),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text(
-          'Manage Medicine',
+        title: Text(
+          'Manage Medicine'.tr(),
           style: TextStyle(
             fontFamily: 'League Spartan',
             fontWeight: FontWeight.w900,
@@ -1681,29 +2224,16 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
           ),
         ),
         centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(
-              Icons.add_circle_rounded,
-              color: _kPrimary,
-              size: 28,
-            ),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const AddEditMedicineScreen()),
-            ).then((_) => _load()),
-          ),
-        ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kPrimary))
+          ? Center(child: CircularProgressIndicator(color: _kPrimary))
           : RefreshIndicator(
               color: _kPrimary,
               onRefresh: _load,
               child: _medications.isEmpty
                   ? ListView(
                       children: [
-                        const SizedBox(height: 80),
+                        SizedBox(height: 80),
                         Center(
                           child: Column(
                             children: [
@@ -1712,18 +2242,18 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                                 size: 72,
                                 color: Colors.grey.shade300,
                               ),
-                              const SizedBox(height: 16),
+                              SizedBox(height: 16),
                               Text(
-                                'No medicines yet',
+                                'No medicines yet'.tr(),
                                 style: TextStyle(
                                   fontSize: 18,
                                   color: Colors.grey.shade500,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
-                              const SizedBox(height: 8),
+                              SizedBox(height: 8),
                               Text(
-                                'Tap + to add your first medicine',
+                                'Tap + to add your first medicine'.tr(),
                                 style: TextStyle(
                                   fontSize: 14,
                                   color: Colors.grey.shade400,
@@ -1747,8 +2277,8 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
         ).then((_) => _load()),
         backgroundColor: _kPrimary,
         icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text(
-          'Add Medicine',
+        label: Text(
+          'Add Medicine'.tr(),
           style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
       ),
@@ -1760,8 +2290,11 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
     bool isExpired = false;
     if (med.expirationDate != null) {
       final diff = med.expirationDate!.difference(DateTime.now()).inDays;
-      if (diff < 0) isExpired = true;
-      else if (diff <= 7) isAlmostExpired = true;
+      if (diff < 0) {
+        isExpired = true;
+      } else if (diff <= 7) {
+        isAlmostExpired = true;
+      }
     }
 
     return Container(
@@ -1795,13 +2328,18 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                     color: _kBlue.withOpacity(0.1),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(
-                    Icons.medication_rounded,
-                    color: _kBlue,
-                    size: 26,
-                  ),
+                  child: med.photo != null
+                      ? ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: _buildMedPhoto(med.photo!, fit: BoxFit.cover),
+                        )
+                      : const Icon(
+                          Icons.medication_rounded,
+                          color: _kBlue,
+                          size: 26,
+                        ),
                 ),
-                const SizedBox(width: 14),
+                SizedBox(width: 14),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1822,14 +2360,46 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                             color: _kTextGrey,
                           ),
                         ),
-                      if (med.whenToTake != null)
-                        Text(
-                          _formatWhenToTake(med.whenToTake, context),
-                          style: const TextStyle(
-                            fontSize: 16,
-                            color: _kTextGrey,
-                          ),
-                        ),
+                      // Show all sessions as chips
+                      Builder(
+                        builder: (ctx) {
+                          final key = med.name.trim().toLowerCase();
+                          final sessions = _medSessions[key] ?? [];
+                          if (sessions.isEmpty) return const SizedBox.shrink();
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: sessions
+                                  .map(
+                                    (s) => Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: _kBlue.withValues(alpha: 0.08),
+                                        borderRadius: BorderRadius.circular(20),
+                                        border: Border.all(
+                                          color: _kBlue.withValues(alpha: 0.2),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        _formatWhenToTake(s, ctx),
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: _kBlue,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                            ),
+                          );
+                        },
+                      ),
                     ],
                   ),
                 ),
@@ -1845,7 +2415,7 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(
-                      '${med.stock} left',
+                      '${med.stock} ${med.stockUnit ?? "left"}',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.bold,
@@ -1857,30 +2427,40 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
             ),
           ),
           if (isExpired || isAlmostExpired) ...[
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: isExpired ? Colors.red.shade50 : Colors.orange.shade50,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: isExpired ? Colors.red.shade200 : Colors.orange.shade200),
+                border: Border.all(
+                  color: isExpired
+                      ? Colors.red.shade200
+                      : Colors.orange.shade200,
+                ),
               ),
               child: Row(
                 children: [
                   Icon(
-                    isExpired ? Icons.error_outline : Icons.warning_amber_rounded,
+                    isExpired
+                        ? Icons.error_outline
+                        : Icons.warning_amber_rounded,
                     size: 16,
-                    color: isExpired ? Colors.red.shade700 : Colors.orange.shade700,
+                    color: isExpired
+                        ? Colors.red.shade700
+                        : Colors.orange.shade700,
                   ),
-                  const SizedBox(width: 6),
+                  SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      isExpired 
-                        ? 'This medicine expired on ${DateFormat('MMM d, yyyy').format(med.expirationDate!)}!'
-                        : 'This medicine will expire soon (${DateFormat('MMM d, yyyy').format(med.expirationDate!)})',
+                      isExpired
+                          ? 'This medicine expired on ${DateFormat('MMM d, yyyy').format(med.expirationDate!)}!'
+                          : 'This medicine will expire soon (${DateFormat('MMM d, yyyy').format(med.expirationDate!)})',
                       style: TextStyle(
                         fontSize: 12,
-                        color: isExpired ? Colors.red.shade700 : Colors.orange.shade800,
+                        color: isExpired
+                            ? Colors.red.shade700
+                            : Colors.orange.shade800,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -1897,7 +2477,10 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                   onPressed: () => Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (_) => AddEditMedicineScreen(existing: med, elderlyId: widget.elderlyId),
+                      builder: (_) => AddEditMedicineScreen(
+                        existing: med,
+                        elderlyId: widget.elderlyId,
+                      ),
                     ),
                   ).then((_) => _load()),
                   icon: const Icon(
@@ -1905,8 +2488,8 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                     size: 16,
                     color: _kBlue,
                   ),
-                  label: const Text(
-                    'Edit',
+                  label: Text(
+                    'Edit'.tr(),
                     style: TextStyle(
                       color: _kBlue,
                       fontWeight: FontWeight.bold,
@@ -1921,7 +2504,7 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: 12),
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: () => _delete(med),
@@ -1930,8 +2513,8 @@ class _ManageMedicineScreenState extends State<ManageMedicineScreen> {
                     size: 16,
                     color: Colors.red,
                   ),
-                  label: const Text(
-                    'Delete',
+                  label: Text(
+                    'Delete'.tr(),
                     style: TextStyle(
                       color: Colors.red,
                       fontWeight: FontWeight.bold,
@@ -1970,15 +2553,18 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
   final _dosageCtrl = TextEditingController();
   final _stockCtrl = TextEditingController();
   final _notesCtrl = TextEditingController();
+  String? _unit = 'tablet(s)';
+  String? _stockUnit = 'tablet(s)';
   String? _whenToTake;
   String? _instruction;
-  String? _priority;
   DateTime? _expirationDate;
   final Set<String> _selectedWhenToTakes = {};
   TimeOfDay? _reminderTime;
-  String? _unit = 'tablet(s)';
+  final bool _isLoadingMap = false;
   bool _saving = false;
   bool _checkingAllergy = false;
+  File? _selectedImage;
+  String? _existingPhotoUrl;
 
   static const _units = [
     'tablet(s)',
@@ -1988,7 +2574,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
     'mg',
     'drops',
     'application(s)',
-    'injection(s)'
+    'injection(s)',
   ];
 
   static const _whenToTakes = [
@@ -2007,7 +2593,6 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
     'With water',
     'As directed',
   ];
-  static const _priorities = ['High', 'Medium', 'Low'];
 
   @override
   void initState() {
@@ -2022,9 +2607,11 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
           final maybeUnit = parts.sublist(1).join(' ');
           if (_units.contains(maybeUnit)) {
             _unit = maybeUnit;
+            _stockUnit = maybeUnit;
           } else {
             _dosageCtrl.text = e.dosage!;
             _unit = 'tablet(s)';
+            _stockUnit = 'tablet(s)';
           }
         } else {
           _dosageCtrl.text = e.dosage!;
@@ -2034,8 +2621,8 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
       _notesCtrl.text = e.notes ?? '';
       _whenToTake = e.whenToTake;
       _instruction = e.instruction;
-      _priority = e.priority;
       _expirationDate = e.expirationDate;
+      _existingPhotoUrl = e.photo;
 
       if (_whenToTake != null) {
         if (_whenToTake!.contains(':')) {
@@ -2058,6 +2645,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
             _reminderTime = const TimeOfDay(hour: 23, minute: 49);
           }
         }
+        _selectedWhenToTakes.add(_whenToTake!);
       }
     } else {
       _selectedWhenToTakes.add('Morning');
@@ -2077,9 +2665,9 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
   Future<void> _checkAllergy() async {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter medicine name first')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Enter medicine name first'.tr())));
       return;
     }
     setState(() {
@@ -2139,16 +2727,16 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Delete Medicine'),
+        title: Text('Delete Medicine'.tr()),
         content: Text('Delete "${med.name}"?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
+            child: Text('Cancel'.tr()),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            child: Text('Delete'.tr(), style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -2157,25 +2745,61 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
     if (ok == true) {
       setState(() => _saving = true);
       try {
-        if (med.scheduleId != null) {
-          try {
-            await Supabase.instance.client
-                .from('schedule')
-                .delete()
-                .eq('schedule_id', med.scheduleId!);
-          } catch (e) {
-            debugPrint('Error deleting linked schedule: $e');
+        final uid = widget.elderlyId ?? Supabase.instance.client.auth.currentUser?.id;
+        bool deletedAll = false;
+        
+        if (uid != null) {
+          final schedRes = await Supabase.instance.client
+              .from('schedule')
+              .select('schedule_id')
+              .eq('elderly_id', uid);
+          final ids = (schedRes as List).map((s) => s['schedule_id']?.toString() ?? '').toList();
+          
+          if (ids.isNotEmpty) {
+            final medRes = await Supabase.instance.client
+                .from('medications')
+                .select('medication_id, schedule_id')
+                .eq('medication_name', med.name)
+                .inFilter('schedule_id', ids);
+                
+            for (final m in medRes as List) {
+              final mId = m['medication_id'];
+              final sId = m['schedule_id'];
+              if (sId != null) {
+                try {
+                  await Supabase.instance.client.from('schedule').delete().eq('schedule_id', sId);
+                } catch (e) {
+                  debugPrint('Error deleting linked schedule: $e');
+                }
+              }
+              cancelMedicationReminder(mId);
+              await Supabase.instance.client.from('medications').delete().eq('medication_id', mId);
+            }
+            deletedAll = true;
           }
         }
-        cancelMedicationReminder(med.id); // stop Dart timer immediately
-        await Supabase.instance.client
-            .from('medications')
-            .delete()
-            .eq('medication_id', med.id);
+        
+        if (!deletedAll) {
+          if (med.scheduleId != null) {
+            try {
+              await Supabase.instance.client
+                  .from('schedule')
+                  .delete()
+                  .eq('schedule_id', med.scheduleId!);
+            } catch (e) {
+              debugPrint('Error deleting linked schedule: $e');
+            }
+          }
+          cancelMedicationReminder(med.id); // stop Dart timer immediately
+          await Supabase.instance.client
+              .from('medications')
+              .delete()
+              .eq('medication_id', med.id);
+        }
         await syncAllMedicationReminders();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Medicine deleted successfully')),
+            SnackBar(content: Text('Medicine deleted successfully'.tr())),
           );
           Navigator.pop(context, 'deleted');
         }
@@ -2194,14 +2818,15 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
   Future<void> _save() async {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Medicine name is required')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Medicine name is required'.tr())));
       return;
     }
     setState(() => _saving = true);
     try {
-      final uid = widget.elderlyId ?? Supabase.instance.client.auth.currentUser?.id;
+      final uid =
+          widget.elderlyId ?? Supabase.instance.client.auth.currentUser?.id;
       if (uid == null) throw Exception('Not logged in');
 
       final elderlyRes = await Supabase.instance.client
@@ -2215,10 +2840,10 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
         await Supabase.instance.client.from('elderly').insert({'user_id': uid});
       }
 
-      final finalNotes = ScheduleMetadata.toNotesString(
+      String finalNotes = ScheduleMetadata.toNotesString(
         notesText: _notesCtrl.text.trim(),
         type: 'Medication',
-        priority: _priority ?? 'medium',
+        priority: 'medium',
         status: 'pending',
         allDay: false,
         endDateTime: null,
@@ -2227,14 +2852,15 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
         photoUrl: null,
       );
 
-      final timesToSave = widget.existing != null 
-          ? [_whenToTake ?? 'As needed'] 
-          : (_selectedWhenToTakes.isEmpty ? ['As needed'] : _selectedWhenToTakes.toList());
+      final timesToSave = _selectedWhenToTakes.isEmpty
+          ? ['As needed']
+          : _selectedWhenToTakes.toList();
 
+      bool isFirstUpdate = true;
       for (String timeToTake in timesToSave) {
         String? whenToTakeValue = timeToTake;
         TimeOfDay? currentReminderTime = _reminderTime;
-        
+
         if (whenToTakeValue == 'Custom' && _reminderTime != null) {
           final hStr = _reminderTime!.hour.toString().padLeft(2, '0');
           final mStr = _reminderTime!.minute.toString().padLeft(2, '0');
@@ -2251,109 +2877,163 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
           currentReminderTime = null;
         }
 
-      // Prevent double scheduling the SAME medicine at the same time
-      if (whenToTakeValue != null && whenToTakeValue != 'As needed') {
-        final checkSchedRes = await Supabase.instance.client
-            .from('schedule')
-            .select('schedule_id')
-            .eq('elderly_id', uid);
-        
-        final elderlySchedIds = (checkSchedRes as List).map((s) => s['schedule_id']).toList();
-        
-        if (elderlySchedIds.isNotEmpty) {
-          final currentMedsRes = await Supabase.instance.client
-              .from('medications')
-              .select('when_to_take, medication_id, medication_name')
-              .inFilter('schedule_id', elderlySchedIds);
-              
-          for (final m in currentMedsRes as List) {
-             final existingName = m['medication_name']?.toString().toLowerCase().trim();
-             final newName = name.toLowerCase().trim();
-             
-             if (m['medication_id'] != widget.existing?.id && 
-                 m['when_to_take'] == whenToTakeValue && 
-                 existingName == newName) {
-               if (mounted) {
-                 ScaffoldMessenger.of(context).showSnackBar(
-                   SnackBar(
-                     content: Text('You already have $name scheduled at this exact time!'), 
-                     backgroundColor: Colors.red,
-                     duration: const Duration(seconds: 4),
-                   ),
-                 );
-                 setState(() => _saving = false);
-               }
-               return;
-             }
+        // Prevent double scheduling the SAME medicine at the same time
+        if (whenToTakeValue != 'As needed') {
+          final checkSchedRes = await Supabase.instance.client
+              .from('schedule')
+              .select('schedule_id')
+              .eq('elderly_id', uid);
+
+          final elderlySchedIds = (checkSchedRes as List)
+              .map((s) => s['schedule_id'])
+              .toList();
+
+          if (elderlySchedIds.isNotEmpty) {
+            final currentMedsRes = await Supabase.instance.client
+                .from('medications')
+                .select('when_to_take, medication_id, medication_name')
+                .inFilter('schedule_id', elderlySchedIds);
+
+            for (final m in currentMedsRes as List) {
+              final existingName = m['medication_name']
+                  ?.toString()
+                  .toLowerCase()
+                  .trim();
+              final newName = name.toLowerCase().trim();
+
+              if (m['medication_id'] != widget.existing?.id &&
+                  m['when_to_take'] == whenToTakeValue &&
+                  existingName == newName) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'You already have $name scheduled at this exact time!',
+                      ),
+                      backgroundColor: Colors.red,
+                      duration: const Duration(seconds: 4),
+                    ),
+                  );
+                  setState(() => _saving = false);
+                }
+                return;
+              }
+            }
           }
         }
-      }
 
-      final now = DateTime.now();
-      DateTime scheduleDateTime;
-      if (currentReminderTime != null) {
-        scheduleDateTime = DateTime(
-          now.year,
-          now.month,
-          now.day,
-          currentReminderTime.hour,
-          currentReminderTime.minute,
-        );
-      } else {
-        scheduleDateTime = DateTime(now.year, now.month, now.day, 8, 0);
-      }
+        final now = DateTime.now();
+        DateTime scheduleDateTime;
+        if (currentReminderTime != null) {
+          scheduleDateTime = DateTime(
+            now.year,
+            now.month,
+            now.day,
+            currentReminderTime.hour,
+            currentReminderTime.minute,
+          );
+        } else {
+          scheduleDateTime = DateTime(now.year, now.month, now.day, 8, 0);
+        }
 
-      final scheduleRow = {
-        'elderly_id': uid,
-        'title': 'Take $name',
-        'schedule_date_time': scheduleDateTime.toUtc().toIso8601String(),
-        'location': 'Home',
-        'notes': finalNotes,
-      };
+        final scheduleRow = {
+          'elderly_id': uid,
+          'title': 'Take $name',
+          'schedule_date_time': scheduleDateTime.toUtc().toIso8601String(),
+          'location': 'Home',
+          'notes': finalNotes,
+        };
 
-      String scheduleId;
-      if (widget.existing?.scheduleId != null) {
-        scheduleId = widget.existing!.scheduleId!;
-        await Supabase.instance.client
-            .from('schedule')
-            .update(scheduleRow)
-            .eq('schedule_id', scheduleId);
-      } else {
-        final newSched = await Supabase.instance.client
-            .from('schedule')
-            .insert(scheduleRow)
-            .select('schedule_id')
-            .single();
-        scheduleId = newSched['schedule_id'] as String;
-      }
+        String scheduleId;
+        if (widget.existing?.scheduleId != null) {
+          scheduleId = widget.existing!.scheduleId!;
+          await Supabase.instance.client
+              .from('schedule')
+              .update(scheduleRow)
+              .eq('schedule_id', scheduleId);
+        } else {
+          final newSched = await Supabase.instance.client
+              .from('schedule')
+              .insert(scheduleRow)
+              .select('schedule_id')
+              .single();
+          scheduleId = newSched['schedule_id'] as String;
+        }
 
-      final data = {
-        'medication_name': name,
-        if (_dosageCtrl.text.trim().isNotEmpty)
-          'dosage': '${_dosageCtrl.text.trim()} ${_unit ?? ""}'.trim(),
-        if (whenToTakeValue != null) 'when_to_take': whenToTakeValue,
-        if (_instruction != null) 'instruction': _instruction,
-        if (_stockCtrl.text.trim().isNotEmpty)
-          'medication_stock': int.tryParse(_stockCtrl.text.trim()),
-        if (_notesCtrl.text.trim().isNotEmpty)
-          'medical_notes': _notesCtrl.text.trim(),
-        if (_priority != null) 'priority': _priority,
-        if (_expirationDate != null)
-          'expiration_date': _expirationDate!
-              .toIso8601String()
-              .split('T')
-              .first,
-        'schedule_id': scheduleId,
-      };
+        final data = {
+          'medication_name': name,
+          if (_dosageCtrl.text.trim().isNotEmpty)
+            'dosage': '${_dosageCtrl.text.trim()} ${_unit ?? ""}'.trim(),
+          'when_to_take': whenToTakeValue,
+          if (_instruction != null) 'instruction': _instruction,
+          if (_stockCtrl.text.trim().isNotEmpty)
+            'medication_stock': int.tryParse(_stockCtrl.text.trim()),
+          if (_notesCtrl.text.trim().isNotEmpty || _stockUnit != null)
+            'medical_notes':
+                '${_notesCtrl.text.trim()}${_stockUnit != null ? '|stock_unit:$_stockUnit' : ''}',
+          if (_expirationDate != null)
+            'expiration_date': _expirationDate!
+                .toIso8601String()
+                .split('T')
+                .first,
+          'schedule_id': scheduleId,
+        };
 
-      if (widget.existing != null) {
-        await Supabase.instance.client
-            .from('medications')
-            .update(data)
-            .eq('medication_id', widget.existing!.id);
-      } else {
-        await Supabase.instance.client.from('medications').insert(data);
-      }
+        if (_selectedImage != null) {
+          try {
+            final bytes = await _selectedImage!.readAsBytes();
+            final base64Str = base64Encode(bytes);
+            final ext = _selectedImage!.path.split('.').last.toLowerCase();
+            final mimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
+            final url = 'data:$mimeType;base64,$base64Str';
+
+            data['photo'] = url;
+            finalNotes = ScheduleMetadata.toNotesString(
+              notesText: _notesCtrl.text.trim(),
+              type: 'Medication',
+              priority: 'medium',
+              status: 'pending',
+              allDay: false,
+              endDateTime: null,
+              reminderTime: null,
+              repeat: 'Daily',
+              photoUrl: url,
+            );
+            await Supabase.instance.client
+                .from('schedule')
+                .update({'notes': finalNotes})
+                .eq('schedule_id', scheduleId);
+          } catch (e) {
+            debugPrint('Failed to upload photo: $e');
+          }
+        } else if (_existingPhotoUrl != null) {
+          data['photo'] = _existingPhotoUrl;
+          finalNotes = ScheduleMetadata.toNotesString(
+            notesText: _notesCtrl.text.trim(),
+            type: 'Medication',
+            priority: 'medium',
+            status: 'pending',
+            allDay: false,
+            endDateTime: null,
+            reminderTime: null,
+            repeat: 'Daily',
+            photoUrl: _existingPhotoUrl,
+          );
+          await Supabase.instance.client
+              .from('schedule')
+              .update({'notes': finalNotes})
+              .eq('schedule_id', scheduleId);
+        }
+
+        if (widget.existing != null && isFirstUpdate) {
+          await Supabase.instance.client
+              .from('medications')
+              .update(data)
+              .eq('medication_id', widget.existing!.id);
+          isFirstUpdate = false;
+        } else {
+          await Supabase.instance.client.from('medications').insert(data);
+        }
       } // End of timesToSave loop
 
       await syncAllMedicationReminders();
@@ -2409,7 +3089,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                     textCapitalization: TextCapitalization.words,
                   ),
                 ),
-                const SizedBox(width: 10),
+                SizedBox(width: 10),
                 GestureDetector(
                   onTap: _checkingAllergy ? null : _checkAllergy,
                   child: Container(
@@ -2421,7 +3101,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                       border: Border.all(color: Colors.orange.shade200),
                     ),
                     child: _checkingAllergy
-                        ? const Padding(
+                        ? Padding(
                             padding: EdgeInsets.all(12),
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
@@ -2437,12 +3117,78 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 4),
+            SizedBox(height: 4),
             Text(
-              'Tap ⚠️ to check allergy info',
+              'Tap ⚠️ to check allergy info'.tr(),
               style: TextStyle(fontSize: 11, color: Colors.orange.shade600),
             ),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
+
+            _label('Photo'),
+            GestureDetector(
+              onTap: () async {
+                final picker = ImagePicker();
+                final xfile = await picker.pickImage(
+                  source: ImageSource.gallery,
+                );
+                if (xfile != null) {
+                  setState(() {
+                    _selectedImage = File(xfile.path);
+                  });
+                }
+              },
+              child: Container(
+                height: 120,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: _selectedImage != null
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.file(_selectedImage!, fit: BoxFit.cover),
+                      )
+                    : (_existingPhotoUrl != null
+                          ? ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: _buildMedPhoto(
+                                _existingPhotoUrl!,
+                                fit: BoxFit.cover,
+                              ),
+                            )
+                          : Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.add_a_photo,
+                                  color: _kTextGrey,
+                                  size: 32,
+                                ),
+                                SizedBox(height: 8),
+                                Text(
+                                  'Tap to add photo',
+                                  style: TextStyle(color: _kTextGrey),
+                                ),
+                              ],
+                            )),
+              ),
+            ),
+            if (_selectedImage != null || _existingPhotoUrl != null)
+              TextButton(
+                onPressed: () {
+                  setState(() {
+                    _selectedImage = null;
+                    _existingPhotoUrl = null;
+                  });
+                },
+                child: Text(
+                  'Remove Photo',
+                  style: TextStyle(color: Colors.red),
+                ),
+              ),
+            SizedBox(height: 16),
 
             _label('Dosage (Amount & Unit)'),
             Row(
@@ -2455,7 +3201,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                     decoration: _inputDeco('e.g. 1'),
                   ),
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: 12),
                 Expanded(
                   flex: 3,
                   child: _dropdown(
@@ -2467,67 +3213,46 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
 
             _label('When to take'),
-            if (isEdit)
-              _dropdown(
-                'Select time',
-                _whenToTakes,
-                _whenToTake,
-                (v) => setState(() {
-                  _whenToTake = v;
-                  if (v == 'Morning') {
-                    _reminderTime = const TimeOfDay(hour: 8, minute: 0);
-                  } else if (v == 'Afternoon') {
-                    _reminderTime = const TimeOfDay(hour: 12, minute: 0);
-                  } else if (v == 'Evening') {
-                    _reminderTime = const TimeOfDay(hour: 18, minute: 0);
-                  } else if (v == 'Night') {
-                    _reminderTime = const TimeOfDay(hour: 23, minute: 49);
-                  } else if (v == 'As needed') {
-                    _reminderTime = null;
-                  }
-                }),
-              )
-            else
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: _whenToTakes.map((t) {
-                  final isSelected = _selectedWhenToTakes.contains(t);
-                  return FilterChip(
-                    label: Text(t),
-                    selected: isSelected,
-                    selectedColor: _kPrimary.withOpacity(0.2),
-                    checkmarkColor: _kPrimary,
-                    onSelected: (val) {
-                      setState(() {
-                        if (t == 'Custom' || t == 'As needed') {
-                           if (val) {
-                             _selectedWhenToTakes.clear();
-                             _selectedWhenToTakes.add(t);
-                             if (t == 'As needed') _reminderTime = null;
-                           } else {
-                             _selectedWhenToTakes.remove(t);
-                           }
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _whenToTakes.map((t) {
+                final isSelected = _selectedWhenToTakes.contains(t);
+                return FilterChip(
+                  label: Text(t),
+                  selected: isSelected,
+                  selectedColor: _kPrimary.withOpacity(0.2),
+                  checkmarkColor: _kPrimary,
+                  onSelected: (val) {
+                    setState(() {
+                      if (t == 'Custom' || t == 'As needed') {
+                        if (val) {
+                          _selectedWhenToTakes.clear();
+                          _selectedWhenToTakes.add(t);
+                          if (t == 'As needed') _reminderTime = null;
                         } else {
-                           if (val) {
-                             _selectedWhenToTakes.remove('Custom');
-                             _selectedWhenToTakes.remove('As needed');
-                             _selectedWhenToTakes.add(t);
-                           } else {
-                             _selectedWhenToTakes.remove(t);
-                           }
+                          _selectedWhenToTakes.remove(t);
                         }
-                      });
-                    },
-                  );
-                }).toList(),
-              ),
-            const SizedBox(height: 16),
+                      } else {
+                        if (val) {
+                          _selectedWhenToTakes.remove('Custom');
+                          _selectedWhenToTakes.remove('As needed');
+                          _selectedWhenToTakes.add(t);
+                        } else {
+                          _selectedWhenToTakes.remove(t);
+                        }
+                      }
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            SizedBox(height: 16),
 
-            if (isEdit ? _whenToTake == 'Custom' : _selectedWhenToTakes.contains('Custom')) ...[
+            if (_selectedWhenToTakes.contains('Custom')) ...[
               _label('Reminder Time'),
               GestureDetector(
                 onTap: () async {
@@ -2542,8 +3267,8 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                       _reminderTime = time;
                       _whenToTake = 'Custom';
                       if (!isEdit) {
-                         _selectedWhenToTakes.clear();
-                         _selectedWhenToTakes.add('Custom');
+                        _selectedWhenToTakes.clear();
+                        _selectedWhenToTakes.add('Custom');
                       }
                     });
                   }
@@ -2572,12 +3297,16 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                               : _kTextDark,
                         ),
                       ),
-                      const Icon(Icons.access_time, size: 18, color: _kTextGrey),
+                      const Icon(
+                        Icons.access_time,
+                        size: 18,
+                        color: _kTextGrey,
+                      ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
             ],
 
             _label('Instruction'),
@@ -2587,15 +3316,32 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
               _instruction,
               (v) => setState(() => _instruction = v),
             ),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
 
-            _label('Stock (number of pills)'),
-            TextField(
-              controller: _stockCtrl,
-              keyboardType: TextInputType.number,
-              decoration: _inputDeco('e.g. 30'),
+            _label('Stock'),
+            Row(
+              children: [
+                Expanded(
+                  flex: 2,
+                  child: TextField(
+                    controller: _stockCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: _inputDeco('e.g. 30'),
+                  ),
+                ),
+                SizedBox(width: 10),
+                Expanded(
+                  flex: 3,
+                  child: _dropdown(
+                    'Unit',
+                    _units,
+                    _stockUnit,
+                    (v) => setState(() => _stockUnit = v),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
 
             _label('Medical Notes'),
             TextField(
@@ -2603,7 +3349,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
               maxLines: 3,
               decoration: _inputDeco('Any notes about this medicine...'),
             ),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
 
             _label('Expiration Date'),
             GestureDetector(
@@ -2649,16 +3395,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-
-            _label('Priority'),
-            _dropdown(
-              'Select priority',
-              _priorities,
-              _priority,
-              (v) => setState(() => _priority = v),
-            ),
-            const SizedBox(height: 32),
+            SizedBox(height: 16),
 
             SizedBox(
               width: double.infinity,
@@ -2688,7 +3425,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
               ),
             ),
             if (isEdit) ...[
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               SizedBox(
                 width: double.infinity,
                 height: 52,
@@ -2702,8 +3439,8 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                     ),
                   ),
                   icon: const Icon(Icons.delete_outline, color: Colors.red),
-                  label: const Text(
-                    'Delete Medicine',
+                  label: Text(
+                    'Delete Medicine'.tr(),
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -2794,7 +3531,11 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
 class MedicineDetailScreen extends StatefulWidget {
   final Medication medication;
   final String? elderlyId;
-  const MedicineDetailScreen({super.key, required this.medication, this.elderlyId});
+  const MedicineDetailScreen({
+    super.key,
+    required this.medication,
+    this.elderlyId,
+  });
 
   @override
   State<MedicineDetailScreen> createState() => _MedicineDetailScreenState();
@@ -2835,16 +3576,16 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Delete Medicine'),
+        title: Text('Delete Medicine'.tr()),
         content: Text('Delete "${_medication.name}"?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
+            child: Text('Cancel'.tr()),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            child: Text('Delete'.tr(), style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -2852,20 +3593,65 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
 
     if (ok == true) {
       try {
-        await Supabase.instance.client
-            .from('medications')
-            .delete()
-            .eq('medication_id', _medication.id);
+        final uid = widget.elderlyId ?? Supabase.instance.client.auth.currentUser?.id;
+        bool deletedAll = false;
+        
+        if (uid != null) {
+          final schedRes = await Supabase.instance.client
+              .from('schedule')
+              .select('schedule_id')
+              .eq('elderly_id', uid);
+          final ids = (schedRes as List).map((s) => s['schedule_id']?.toString() ?? '').toList();
+          
+          if (ids.isNotEmpty) {
+            final medRes = await Supabase.instance.client
+                .from('medications')
+                .select('medication_id, schedule_id')
+                .eq('medication_name', _medication.name)
+                .inFilter('schedule_id', ids);
+                
+            for (final m in medRes as List) {
+              final mId = m['medication_id'];
+              final sId = m['schedule_id'];
+              if (sId != null) {
+                try {
+                  await Supabase.instance.client.from('schedule').delete().eq('schedule_id', sId);
+                } catch (_) {}
+              }
+              cancelMedicationReminder(mId);
+              await Supabase.instance.client.from('medications').delete().eq('medication_id', mId);
+            }
+            deletedAll = true;
+          }
+        }
+        
+        if (!deletedAll) {
+          if (_medication.scheduleId != null) {
+            try {
+              await Supabase.instance.client
+                  .from('schedule')
+                  .delete()
+                  .eq('schedule_id', _medication.scheduleId!);
+            } catch (_) {}
+          }
+          cancelMedicationReminder(_medication.id);
+          await Supabase.instance.client
+              .from('medications')
+              .delete()
+              .eq('medication_id', _medication.id);
+        }
         await syncAllMedicationReminders();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Medicine deleted successfully')),
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(content: Text('Medicine deleted successfully'.tr())),
           );
-          Navigator.pop(context, true);
+          Navigator.pop(ctx, true);
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
             SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
           );
         }
@@ -2885,8 +3671,8 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
           icon: const Icon(Icons.arrow_back, color: _kTextDark),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text(
-          'Medicine Details',
+        title: Text(
+          'Medicine Details'.tr(),
           style: TextStyle(
             fontFamily: 'League Spartan',
             fontWeight: FontWeight.w900,
@@ -2902,7 +3688,10 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => AddEditMedicineScreen(existing: med, elderlyId: widget.elderlyId),
+                    builder: (_) => AddEditMedicineScreen(
+                      existing: med,
+                      elderlyId: widget.elderlyId,
+                    ),
                   ),
                 ).then((val) {
                   if (val == 'deleted') {
@@ -2919,7 +3708,7 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kPrimary))
+          ? Center(child: CircularProgressIndicator(color: _kPrimary))
           : SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
@@ -2938,20 +3727,59 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                     ),
                     child: Column(
                       children: [
-                        Container(
-                          width: 72,
-                          height: 72,
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: const Icon(
-                            Icons.medication_rounded,
-                            color: Colors.white,
-                            size: 42,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
+                        med.photo != null
+                            ? GestureDetector(
+                                onTap: () => showDialog(
+                                  context: context,
+                                  builder: (_) => Dialog(
+                                    backgroundColor: Colors.transparent,
+                                    child: Stack(
+                                      alignment: Alignment.center,
+                                      children: [
+                                        InteractiveViewer(
+                                          child: _buildMedPhoto(med.photo!),
+                                        ),
+                                        Positioned(
+                                          top: 0,
+                                          right: 0,
+                                          child: IconButton(
+                                            icon: const Icon(
+                                              Icons.close,
+                                              color: Colors.white,
+                                              size: 30,
+                                            ),
+                                            onPressed: () =>
+                                                Navigator.pop(context),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(20),
+                                  child: _buildMedPhoto(
+                                    med.photo!,
+                                    width: 72,
+                                    height: 72,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                              )
+                            : Container(
+                                width: 72,
+                                height: 72,
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.2),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: const Icon(
+                                  Icons.medication_rounded,
+                                  color: Colors.white,
+                                  size: 42,
+                                ),
+                              ),
+                        SizedBox(height: 16),
                         Text(
                           med.name,
                           style: const TextStyle(
@@ -2972,7 +3800,7 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                     ),
                   ),
 
-                  const SizedBox(height: 20),
+                  SizedBox(height: 20),
 
                   // Details card
                   _infoCard([
@@ -2990,7 +3818,7 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                       Icons.inventory_2_rounded,
                       'Stock',
                       med.stock != null
-                          ? '${med.stock} tablets remaining'
+                          ? '${med.stock} ${med.stockUnit ?? "remaining"}'
                           : 'Not tracked',
                     ),
                     if (med.expirationDate != null)
@@ -2999,13 +3827,11 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                         'Expires',
                         DateFormat('dd MMM yyyy').format(med.expirationDate!),
                       ),
-                    if (med.priority != null)
-                      _infoRow(Icons.flag_rounded, 'Priority', med.priority!),
                     if (med.notes?.isNotEmpty == true)
                       _infoRow(Icons.notes_rounded, 'Notes', med.notes!),
                   ]),
 
-                  const SizedBox(height: 16),
+                  SizedBox(height: 16),
 
                   // Stock warning
                   if (med.stock != null && med.stock! < 5)
@@ -3024,10 +3850,10 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                             color: Colors.red,
                             size: 22,
                           ),
-                          const SizedBox(width: 10),
+                          SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              'Low stock! Only ${med.stock} tablet${med.stock == 1 ? '' : 's'} remaining. Please refill soon.',
+                              'Low stock! Only ${med.stock} ${med.stockUnit ?? "tablet(s)"} remaining. Please refill soon.',
                               style: const TextStyle(
                                 fontSize: 13,
                                 color: Colors.red,
@@ -3039,7 +3865,7 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                       ),
                     ),
 
-                  const SizedBox(height: 16),
+                  SizedBox(height: 16),
 
                   // Check allergy button
                   SizedBox(
@@ -3062,8 +3888,8 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
                         Icons.warning_amber_rounded,
                         color: Colors.orange,
                       ),
-                      label: const Text(
-                        'Check Allergy & Side Effects',
+                      label: Text(
+                        'Check Allergy & Side Effects'.tr(),
                         style: TextStyle(
                           color: Colors.orange,
                           fontWeight: FontWeight.bold,
@@ -3111,7 +3937,7 @@ class _MedicineDetailScreenState extends State<MedicineDetailScreen> {
             ),
             child: Icon(icon, color: _kPrimary, size: 18),
           ),
-          const SizedBox(width: 14),
+          SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -3200,7 +4026,7 @@ class AllergyAlertSheet extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 20),
+          SizedBox(height: 20),
 
           // Icon
           Container(
@@ -3216,7 +4042,7 @@ class AllergyAlertSheet extends StatelessWidget {
               size: 48,
             ),
           ),
-          const SizedBox(height: 16),
+          SizedBox(height: 16),
 
           Text(
             conflict ? 'Potential Allergy Alert!' : 'No Known Conflicts',
@@ -3227,7 +4053,7 @@ class AllergyAlertSheet extends StatelessWidget {
               color: conflict ? Colors.red : Colors.green.shade700,
             ),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8),
 
           Text(
             medicineName,
@@ -3237,7 +4063,7 @@ class AllergyAlertSheet extends StatelessWidget {
               color: _kTextDark,
             ),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: 12),
 
           Container(
             width: double.infinity,
@@ -3254,14 +4080,14 @@ class AllergyAlertSheet extends StatelessWidget {
               children: [
                 if (userAllergies?.isNotEmpty == true) ...[
                   Text(
-                    'Your recorded allergies:',
+                    'Your recorded allergies:'.tr(),
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.grey.shade600,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  SizedBox(height: 4),
                   Text(
                     userAllergies!,
                     style: TextStyle(
@@ -3270,7 +4096,7 @@ class AllergyAlertSheet extends StatelessWidget {
                       color: conflict ? Colors.red.shade700 : _kTextDark,
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  SizedBox(height: 12),
                 ],
                 Text(
                   conflict
@@ -3287,7 +4113,7 @@ class AllergyAlertSheet extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: 20),
+          SizedBox(height: 20),
 
           // Web search for more info
           SizedBox(
@@ -3304,7 +4130,7 @@ class AllergyAlertSheet extends StatelessWidget {
                 }
               },
               icon: const Icon(Icons.open_in_browser, size: 18),
-              label: const Text('Search More Info Online'),
+              label: Text('Search More Info Online'.tr()),
               style: OutlinedButton.styleFrom(
                 side: const BorderSide(color: _kBlue),
                 foregroundColor: _kBlue,
@@ -3315,7 +4141,7 @@ class AllergyAlertSheet extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: 10),
 
           SizedBox(
             width: double.infinity,

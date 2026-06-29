@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'health_info_screen.dart';
 import 'caregiver_qr_screen.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class HealthInfoIntroScreen extends StatelessWidget {
   const HealthInfoIntroScreen({super.key});
@@ -42,9 +43,9 @@ class HealthInfoIntroScreen extends StatelessWidget {
                   );
                 },
               ),
-              const SizedBox(height: 40),
-              const Text(
-                'Set up your Profile',
+              SizedBox(height: 40),
+              Text(
+                'Set up your Profile'.tr(),
                 style: TextStyle(
                   fontFamily: 'League Spartan',
                   fontSize: 36,
@@ -52,11 +53,11 @@ class HealthInfoIntroScreen extends StatelessWidget {
                   color: Color(0xFF27252E),
                 ),
               ),
-              const SizedBox(height: 16),
-              const Padding(
+              SizedBox(height: 16),
+              Padding(
                 padding: EdgeInsets.symmetric(horizontal: 40.0),
                 child: Text(
-                  'We need more information about you',
+                  'We need more information about you'.tr(),
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: 'Open Sans',
@@ -84,14 +85,14 @@ class HealthInfoIntroScreen extends StatelessWidget {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       elevation: 0,
                     ),
-                    child: const Text(
-                      'Set Up',
+                    child: Text(
+                      'Set Up'.tr(),
                       style: TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold),
                     ),
                   ),
                 ),
               ),
-              const SizedBox(height: 24),
+              SizedBox(height: 24),
               GestureDetector(
                 onTap: () {
                   Navigator.push(
@@ -99,8 +100,8 @@ class HealthInfoIntroScreen extends StatelessWidget {
                     MaterialPageRoute(builder: (_) => const CaregiverQrScreen()),
                   );
                 },
-                child: const Text(
-                  'Skip for now',
+                child: Text(
+                  'Skip for now'.tr(),
                   style: TextStyle(
                     color: Color(0xFF51A77B),
                     fontSize: 20,
@@ -108,7 +109,7 @@ class HealthInfoIntroScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 40),
+              SizedBox(height: 40),
             ],
           ),
         ),

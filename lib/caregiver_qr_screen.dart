@@ -6,6 +6,7 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:typed_data';
 import 'profile_success_screen.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class CaregiverQrScreen extends StatefulWidget {
   const CaregiverQrScreen({super.key});
@@ -29,7 +30,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
     final status = await Permission.storage.request();
     if (!status.isGranted) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Storage permission is required to save QR code.')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Storage permission is required to save QR code.'.tr())));
       }
       // Continue anyway, newer Android versions might work via MediaStore without explicit permission
     }
@@ -44,7 +45,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
         );
         if (mounted) {
           if (result['isSuccess'] == true) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('QR Code saved to gallery!')));
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('QR Code saved to gallery!'.tr())));
           } else {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to save QR code: ${result['errorMessage']}')));
           }
@@ -74,7 +75,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
           child: Column(
             children: [
-              const Text(
+              Text(
                 'Let\'s Add Your Caregiver',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -84,9 +85,9 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                   color: Color(0xFF27252E),
                 ),
               ),
-              const SizedBox(height: 16),
-              const Text(
-                'Caregiver can easily connect to your account to monitor your health remotely. Ask them to scan the QR below to connect.',
+              SizedBox(height: 16),
+              Text(
+                'Caregiver can easily connect to your account to monitor your health remotely. Ask them to scan the QR below to connect.'.tr(),
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontFamily: 'Open Sans',
@@ -95,7 +96,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                   color: Color(0xFF6C7278),
                 ),
               ),
-              const SizedBox(height: 40),
+              SizedBox(height: 40),
               
               // QR Code Area
               Screenshot(
@@ -115,8 +116,8 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                   ),
                   child: Column(
                     children: [
-                      const Text(
-                        'MYEMAS QR',
+                      Text(
+                        'MYEMAS QR'.tr(),
                         style: TextStyle(
                           fontFamily: 'League Spartan',
                           fontSize: 20,
@@ -124,7 +125,7 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                           color: Color(0xFF27252E),
                         ),
                       ),
-                      const SizedBox(height: 16),
+                      SizedBox(height: 16),
                       if (_userId != null)
                         QrImageView(
                           data: _userId!,
@@ -132,12 +133,12 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                           size: 200.0,
                         )
                       else
-                        const SizedBox(height: 200, width: 200, child: Center(child: Text("User ID missing"))),
+                        SizedBox(height: 200, width: 200, child: Center(child: Text("User ID missing".tr()))),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 32),
+              SizedBox(height: 32),
               
               // Download Button
               SizedBox(
@@ -149,20 +150,20 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                     side: const BorderSide(color: Color(0xFF51A77B), width: 2),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                  child: const Row(
+                  child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(Icons.download, color: Color(0xFF51A77B)),
                       SizedBox(width: 8),
                       Text(
-                        'Download',
+                        'Download'.tr(),
                         style: TextStyle(fontSize: 18, color: Color(0xFF51A77B), fontWeight: FontWeight.bold),
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 40),
+              SizedBox(height: 40),
 
               // Next Button
               SizedBox(
@@ -180,13 +181,13 @@ class _CaregiverQrScreenState extends State<CaregiverQrScreen> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     elevation: 0,
                   ),
-                  child: const Text(
-                    'Next',
+                  child: Text(
+                    'Next'.tr(),
                     style: TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                 ),
               ),
-              const SizedBox(height: 24),
+              SizedBox(height: 24),
             ],
           ),
         ),

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:permission_handler/permission_handler.dart';
 
 class VoiceSearchBar extends StatefulWidget {
   final Function(String command) onCommand;
@@ -16,11 +18,36 @@ class _VoiceSearchBarState extends State<VoiceSearchBar> {
 
   void _listen() async {
     if (!_isListening) {
+      final micStatus = await Permission.microphone.request();
+      final speechStatus = await Permission.speech.request();
+      
+      if (micStatus.isPermanentlyDenied || speechStatus.isPermanentlyDenied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Microphone permission is blocked. Please enable it in Settings.'.tr()),
+              action: SnackBarAction(
+                label: 'Settings'.tr(),
+                onPressed: () => openAppSettings(),
+              ),
+            ),
+          );
+        }
+        return;
+      } 
+      // Even if status == denied (not permanently), we will still attempt to initialize 
+      // because the speech_to_text library has its own built-in permission prompter 
+      // that might work better on some physical devices.
+
       bool available = await _speech.initialize(
+        debugLogging: true,
         onStatus: (val) {
           if (val == 'done' || val == 'notListening') setState(() => _isListening = false);
         },
-        onError: (val) => setState(() => _isListening = false),
+        onError: (val) {
+          debugPrint('Speech onError: $val');
+          setState(() => _isListening = false);
+        },
       );
       if (available) {
         setState(() {
@@ -42,6 +69,12 @@ class _VoiceSearchBarState extends State<VoiceSearchBar> {
             }
           },
         );
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Speech recognition not available on this device'.tr())),
+          );
+        }
       }
     } else {
       setState(() => _isListening = false);
@@ -68,13 +101,9 @@ class _VoiceSearchBarState extends State<VoiceSearchBar> {
         controller: _ctrl,
         onSubmitted: _submit,
         decoration: InputDecoration(
-          hintText: 'Search function (e.g. "Add Medicine")',
+          hintText: 'Search function (e.g. "Add Medicine")'.tr(),
           hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 16),
           prefixIcon: const Icon(Icons.search, color: Colors.grey),
-          suffixIcon: IconButton(
-            icon: Icon(_isListening ? Icons.mic : Icons.mic_none, color: _isListening ? Colors.red : Colors.grey),
-            onPressed: _listen,
-          ),
           filled: true,
           fillColor: Colors.white,
           contentPadding: const EdgeInsets.symmetric(vertical: 0),

@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'role_selection_screen.dart';
 import 'elderly_dashboard.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class BiometricPromptScreen extends StatefulWidget {
   const BiometricPromptScreen({super.key});
@@ -26,9 +27,9 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
       if (availableBiometrics.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
-                'No biometrics enrolled. Please set up fingerprint or Face ID in your device settings first.',
+                'No biometrics enrolled. Please set up fingerprint or Face ID in your device settings first.'.tr(),
               ),
               duration: Duration(seconds: 4),
             ),
@@ -133,10 +134,10 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
                   color: Color(0xFF55A47A),
                 ),
               ),
-              const SizedBox(height: 32),
+              SizedBox(height: 32),
 
               // Title
-              const Text(
+              Text(
                 'Enable Biometric\nLogin',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -146,10 +147,10 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
                   height: 1.3,
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
 
               // Subtitle
-              const Text(
+              Text(
                 'Use your fingerprint or Face ID to log in\nquickly and securely in the future.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -158,7 +159,7 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
                   height: 1.6,
                 ),
               ),
-              const SizedBox(height: 48),
+              SizedBox(height: 48),
 
               // Enable Button
               SizedBox(
@@ -174,13 +175,13 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
                     elevation: 0,
                   ),
                   child: _isSaving
-                      ? const SizedBox(
+                      ? SizedBox(
                           height: 22,
                           width: 22,
                           child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
                         )
-                      : const Text(
-                          'Enable Biometric',
+                      : Text(
+                          'Enable Biometric'.tr(),
                           style: TextStyle(
                             fontSize: 17,
                             color: Colors.white,
@@ -189,7 +190,7 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
                         ),
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
 
               // Skip Button
               SizedBox(
@@ -203,8 +204,8 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  child: const Text(
-                    'Skip for Now',
+                  child: Text(
+                    'Skip for Now'.tr(),
                     style: TextStyle(
                       fontSize: 17,
                       color: Color(0xFF6B7280),
@@ -217,15 +218,15 @@ class _BiometricPromptScreenState extends State<BiometricPromptScreen> {
               const Spacer(),
 
               // Info note
-              const Text(
-                'You can change this setting later in your profile.',
+              Text(
+                'You can change this setting later in your profile.'.tr(),
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 12,
                   color: Color(0xFF9CA3AF),
                 ),
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
             ],
           ),
         ),

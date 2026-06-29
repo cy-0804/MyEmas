@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'caregiver_qr_screen.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class HealthInfoScreen extends StatefulWidget {
-  const HealthInfoScreen({super.key});
+  final bool isEditMode;
+  final String? elderlyId;
+  
+  const HealthInfoScreen({super.key, this.isEditMode = false, this.elderlyId});
 
   @override
   State<HealthInfoScreen> createState() => _HealthInfoScreenState();
@@ -19,6 +23,9 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
   final Set<String> _selectedAllergies = {};
   bool _isLoading = false;
 
+  final TextEditingController _otherAllergyCtrl = TextEditingController();
+  final TextEditingController _otherConditionCtrl = TextEditingController();
+
   final List<String> _bloodTypes = [
     'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'Unknown'
   ];
@@ -28,20 +35,102 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
   ];
   final List<String> _chronicConditions = [
     'None', 'Cardiovascular', 'Diabetes', 'Hypertension',
-    'Arthritis', 'Asthma', 'Kidney Disease', 'Other'
+    'Arthritis', 'Asthma', 'Kidney Disease', 'Other (Specify)'
   ];
   final List<String> _commonAllergies = [
-    'Penicillin', 'Aspirin', 'Sulfa', 'Codeine', 'Peanuts', 'Seafood', 'Eggs', 'Milk', 'Other'
+    'Penicillin', 'Aspirin', 'Sulfa', 'Codeine', 'Peanuts', 'Seafood', 'Eggs', 'Milk', 'Other (Specify)'
   ];
+
+  @override
+  void dispose() {
+    _otherAllergyCtrl.dispose();
+    _otherConditionCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isEditMode) {
+      _loadExistingData();
+    }
+  }
+
+  Future<void> _loadExistingData() async {
+    setState(() => _isLoading = true);
+    try {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user == null) return;
+
+      final targetId = widget.elderlyId ?? user.id;
+
+      // Load basic health info
+      final elderlyRes = await Supabase.instance.client
+          .from('elderly')
+          .select('blood_type, allergies, mobility_status, chronic_condition')
+          .eq('user_id', targetId)
+          .maybeSingle();
+
+      if (elderlyRes != null) {
+        _bloodType = elderlyRes['blood_type'];
+        _allergies = elderlyRes['allergies'];
+        _mobilityStatus = elderlyRes['mobility_status'];
+        
+        final chronic = elderlyRes['chronic_condition'] as String?;
+        if (chronic != null && chronic.isNotEmpty) {
+          if (chronic == 'None') {
+            _selectedConditions.add('None');
+          } else {
+            final parts = chronic.split(',').map((e) => e.trim());
+            for (final p in parts) {
+              if (_chronicConditions.contains(p)) {
+                _selectedConditions.add(p);
+              } else {
+                _selectedConditions.add('Other (Specify)');
+                _otherConditionCtrl.text = _otherConditionCtrl.text.isEmpty ? p : '${_otherConditionCtrl.text}, $p';
+              }
+            }
+          }
+        }
+      }
+
+      // Load specific allergies if they exist
+      if (_allergies == 'Yes') {
+        final allergyRes = await Supabase.instance.client
+            .from('allergy_list')
+            .select('allergy(name)')
+            .eq('elderly_id', targetId);
+            
+        final List list = allergyRes as List;
+        for (var row in list) {
+          final allergyData = row['allergy'];
+          if (allergyData != null && allergyData['name'] != null) {
+            final name = allergyData['name'] as String;
+            if (_commonAllergies.contains(name)) {
+              _selectedAllergies.add(name);
+            } else {
+              _selectedAllergies.add('Other (Specify)');
+              _otherAllergyCtrl.text = _otherAllergyCtrl.text.isEmpty ? name : '${_otherAllergyCtrl.text}, $name';
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error loading health info: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
 
   Future<void> _saveAndNext() async {
     setState(() => _isLoading = true);
     try {
       final user = Supabase.instance.client.auth.currentUser;
       if (user == null) throw Exception('[Auth] No authenticated user found');
+      
+      final targetId = widget.elderlyId ?? user.id;
 
-      debugPrint('DEBUG: user.id = ${user.id}');
-      debugPrint('DEBUG: user.email = ${user.email}');
+      debugPrint('DEBUG: targetId = $targetId');
 
       // ── Step 1: Check if user exists in public.users ─────────────────────
       Map<String, dynamic>? existingUser;
@@ -49,7 +138,7 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
         existingUser = await Supabase.instance.client
             .from('users')
             .select('user_id, role_id')
-            .eq('user_id', user.id)
+            .eq('user_id', targetId)
             .maybeSingle();
         debugPrint('DEBUG: existingUser = $existingUser');
       } catch (e) {
@@ -59,9 +148,9 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
       // ── Step 2: Create users row if missing ──────────────────────────────
       if (existingUser == null) {
         try {
-          final insertData = <String, dynamic>{'user_id': user.id};
-          if (user.email != null) insertData['email'] = user.email;
-          if (user.phone != null && user.phone!.isNotEmpty) {
+          final insertData = <String, dynamic>{'user_id': targetId};
+          if (targetId == user.id && user.email != null) insertData['email'] = user.email;
+          if (targetId == user.id && user.phone != null && user.phone!.isNotEmpty) {
             insertData['phone_num'] = user.phone;
           }
           insertData['role_id'] = 'elderly';
@@ -76,7 +165,7 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
           await Supabase.instance.client
               .from('users')
               .update({'role_id': 'elderly'})
-              .eq('user_id', user.id);
+              .eq('user_id', targetId);
           debugPrint('DEBUG: users role_id updated');
         } catch (e) {
           throw Exception('[Step 2 - Update role_id] $e');
@@ -84,13 +173,21 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
       }
 
       // ── Step 3: Build health data payload ───────────────────────────────
-      final chronicStr = _selectedConditions.isEmpty
+      final finalConditions = Set<String>.from(_selectedConditions);
+      if (finalConditions.contains('Other (Specify)')) {
+        finalConditions.remove('Other (Specify)');
+        if (_otherConditionCtrl.text.trim().isNotEmpty) {
+          finalConditions.addAll(_otherConditionCtrl.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty));
+        }
+      }
+      
+      final chronicStr = finalConditions.isEmpty
           ? null
-          : _selectedConditions.contains('None')
+          : finalConditions.contains('None')
               ? 'None'
-              : _selectedConditions.join(', ');
+              : finalConditions.join(', ');
 
-      final data = <String, dynamic>{'user_id': user.id};
+      final data = <String, dynamic>{'user_id': targetId};
       if (_bloodType != null) data['blood_type'] = _bloodType;
       if (_allergies != null) data['allergies'] = _allergies;
       if (_mobilityStatus != null) data['mobility_status'] = _mobilityStatus;
@@ -109,12 +206,20 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
       }
 
       // ── Step 5: Save allergies to allergy_list ───────────────────────────
-      if (_allergies == 'Yes' && _selectedAllergies.isNotEmpty) {
+      if (_allergies == 'Yes' && (_selectedAllergies.isNotEmpty || _otherAllergyCtrl.text.isNotEmpty)) {
         try {
           // Clear old ones first to prevent duplicates (if updating)
-          try { await Supabase.instance.client.from('allergy_list').delete().eq('elderly_id', user.id); } catch (_) {}
+          try { await Supabase.instance.client.from('allergy_list').delete().eq('elderly_id', targetId); } catch (_) {}
 
-          for (final allergyName in _selectedAllergies) {
+          final finalAllergies = Set<String>.from(_selectedAllergies);
+          if (finalAllergies.contains('Other (Specify)')) {
+            finalAllergies.remove('Other (Specify)');
+            if (_otherAllergyCtrl.text.trim().isNotEmpty) {
+              finalAllergies.addAll(_otherAllergyCtrl.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty));
+            }
+          }
+
+          for (final allergyName in finalAllergies) {
             final checkRes = await Supabase.instance.client
                 .from('allergy')
                 .select('allergy_id')
@@ -135,7 +240,7 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
 
             await Supabase.instance.client.from('allergy_list').upsert({
               'allergy_id': allergyId,
-              'elderly_id': user.id,
+              'elderly_id': targetId,
             });
           }
           debugPrint('DEBUG: allergy_list upsert OK');
@@ -143,14 +248,24 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
           throw Exception('[Step 5 - Save allergies] $e');
         }
       } else if (_allergies == 'No') {
-        try { await Supabase.instance.client.from('allergy_list').delete().eq('elderly_id', user.id); } catch (_) {}
+        try { await Supabase.instance.client.from('allergy_list').delete().eq('elderly_id', targetId); } catch (_) {}
       }
 
       if (mounted) {
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => const CaregiverQrScreen()),
-        );
+        if (widget.isEditMode) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Health info updated successfully!'.tr()),
+              backgroundColor: const Color(0xFF51A77B),
+            ),
+          );
+          Navigator.pop(context);
+        } else {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const CaregiverQrScreen()),
+          );
+        }
       }
     } catch (e) {
       debugPrint('ERROR: $e');
@@ -237,8 +352,8 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        const Text(
-          'Select your allergies',
+        Text(
+          'Select your allergies'.tr(),
           style: TextStyle(
             fontFamily: 'Open Sans',
             fontSize: 16,
@@ -304,6 +419,17 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
             }).toList(),
           ),
         ),
+        if (_selectedAllergies.contains('Other (Specify)')) ...[
+          const SizedBox(height: 12),
+          TextField(
+            controller: _otherAllergyCtrl,
+            decoration: InputDecoration(
+              labelText: 'Please specify other allergies'.tr(),
+              hintText: 'e.g. Pollen, Dust (comma separated)'.tr(),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
         const SizedBox(height: 24),
       ],
     );
@@ -313,8 +439,8 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        const Text(
-          'Chronic Condition',
+        Text(
+          'Chronic Condition'.tr(),
           style: TextStyle(
             fontFamily: 'Open Sans',
             fontSize: 20,
@@ -324,8 +450,8 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
           ),
         ),
         const SizedBox(height: 4),
-        const Text(
-          'Select all that apply',
+        Text(
+          'Select all that apply'.tr(),
           style: TextStyle(
             fontFamily: 'Open Sans',
             fontSize: 12,
@@ -398,6 +524,17 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
             }).toList(),
           ),
         ),
+        if (_selectedConditions.contains('Other (Specify)')) ...[
+          const SizedBox(height: 12),
+          TextField(
+            controller: _otherConditionCtrl,
+            decoration: InputDecoration(
+              labelText: 'Please specify other conditions'.tr(),
+              hintText: 'e.g. Asthma, Thyroid (comma separated)'.tr(),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
         const SizedBox(height: 24),
       ],
     );
@@ -417,13 +554,13 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
       ),
       body: SafeArea(
         child: _isLoading
-            ? const Center(child: CircularProgressIndicator(color: Color(0xFF51A77B)))
+            ? Center(child: CircularProgressIndicator(color: Color(0xFF51A77B)))
             : SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
                 child: Column(
                   children: [
-                    const Text(
-                      'Health Info',
+                    Text(
+                      widget.isEditMode ? 'Edit Health Info'.tr() : 'Health Info'.tr(),
                       style: TextStyle(
                         fontFamily: 'League Spartan',
                         fontSize: 36,
@@ -433,8 +570,10 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    const Text(
-                      'Select your basic health information for better experience',
+                    Text(
+                      widget.isEditMode 
+                          ? 'Update your health information below'.tr()
+                          : 'Select your basic health information for better experience'.tr(),
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontFamily: 'Open Sans',
@@ -478,8 +617,8 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                           ),
                           elevation: 0,
                         ),
-                        child: const Text(
-                          'Save & Continue',
+                        child: Text(
+                          widget.isEditMode ? 'Update Info'.tr() : 'Save & Continue'.tr(),
                           style: TextStyle(
                             fontSize: 20,
                             color: Colors.white,
@@ -488,23 +627,25 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 16),
-                    GestureDetector(
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (_) => const CaregiverQrScreen()),
-                        );
-                      },
-                      child: const Text(
-                        'Skip for now',
-                        style: TextStyle(
-                          color: Color(0xFF51A77B),
-                          fontSize: 20,
-                          fontWeight: FontWeight.w600,
+                    if (!widget.isEditMode) ...[
+                      const SizedBox(height: 16),
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const CaregiverQrScreen()),
+                          );
+                        },
+                        child: Text(
+                          'Skip for now'.tr(),
+                          style: TextStyle(
+                            color: Color(0xFF51A77B),
+                            fontSize: 20,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
-                    ),
+                    ],
                     const SizedBox(height: 40),
                   ],
                 ),

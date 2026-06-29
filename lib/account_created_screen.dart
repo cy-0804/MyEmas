@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'login_screen.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class AccountCreatedScreen extends StatelessWidget {
   const AccountCreatedScreen({super.key});
@@ -33,7 +34,7 @@ class AccountCreatedScreen extends StatelessWidget {
               const SizedBox(height: 40),
 
               // Title
-              const Text(
+              Text(
                 'Your Account\nis Verified!',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -46,7 +47,7 @@ class AccountCreatedScreen extends StatelessWidget {
               const SizedBox(height: 16),
 
               // Subtitle
-              const Text(
+              Text(
                 'Only one click to explore your\nhealthcare solution.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -76,8 +77,8 @@ class AccountCreatedScreen extends StatelessWidget {
                     ),
                     elevation: 0,
                   ),
-                  child: const Text(
-                    'Log In',
+                  child: Text(
+                    'Log In'.tr(),
                     style: TextStyle(
                       fontSize: 17,
                       color: Colors.white,

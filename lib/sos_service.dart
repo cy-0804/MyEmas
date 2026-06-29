@@ -153,29 +153,31 @@ class SosService {
       return;
     }
 
-    // Request permissions
-    final callPerm = await Permission.phone.request();
-    final smsPerm = await Permission.sms.request();
-    
+    // Check permissions (they should have been requested earlier)
+    final isCallGranted = await Permission.phone.isGranted;
+    final isSmsGranted = await Permission.sms.isGranted;
+
+    // Clean phone number (remove spaces, hyphens, etc.)
+    final cleanPhone = phone.replaceAll(RegExp(r'[^\d+]'), '');
+
     // Send SMS Automatically in the background
     try {
-      final mapLink = _lastPosition != null 
-          ? 'https://maps.google.com/?q=${_lastPosition!.latitude},${_lastPosition!.longitude}' 
-          : '';
-      final msg = 'SOS EMERGENCY! I need help immediately. Location: ${_lastAddress ?? 'Unknown'}. $mapLink';
+      // Due to Malaysian MCMC directives, SMS containing URLs are BLOCKED by telcos.
+      // We must only send the text address. The caregiver app will receive the exact map link via push notification.
+      final msg = 'SOS EMERGENCY! I need help immediately. Location: ${_lastAddress ?? 'Unknown'}.';
       
-      if (smsPerm.isGranted) {
+      if (isSmsGranted) {
         final Telephony telephony = Telephony.instance;
         await telephony.sendSms(
-          to: phone,
+          to: cleanPhone,
           message: msg,
         );
-        debugPrint('SOS: Background SMS sent successfully.');
+        debugPrint('SOS: Background SMS sent successfully to $cleanPhone.');
       } else {
         debugPrint('SOS: SMS permission denied, falling back to Intent.');
         final smsIntent = AndroidIntent(
           action: 'android.intent.action.SENDTO',
-          data: 'smsto:$phone',
+          data: 'smsto:$cleanPhone',
           arguments: {'sms_body': msg},
         );
         await smsIntent.launch();
@@ -187,7 +189,7 @@ class SosService {
     // Small delay to ensure SMS finishes sending before call takes over
     await Future.delayed(const Duration(milliseconds: 1000));
     
-    if (callPerm.isGranted) {
+    if (isCallGranted) {
       // ACTION_CALL: immediately dials without user needing to tap
       final intent = AndroidIntent(
         action: 'android.intent.action.CALL',
@@ -203,8 +205,6 @@ class SosService {
 
   // ─── Phone state listener ───────────────────────────────────────────────
   void _listenToPhoneState() async {
-    // Request READ_PHONE_STATE permission
-    await Permission.phone.request();
     _callWasAnswered = false;
 
     _phoneStateSubscription = PhoneState.stream.listen((event) {

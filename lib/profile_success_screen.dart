@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'elderly_dashboard.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class ProfileSuccessScreen extends StatelessWidget {
   final Widget? nextScreen;
@@ -27,8 +28,8 @@ class ProfileSuccessScreen extends StatelessWidget {
                 child: const Icon(Icons.check, size: 80, color: Colors.white),
               ),
               const SizedBox(height: 40),
-              const Text(
-                'Your profile is finalized!',
+              Text(
+                'Your profile is finalized!'.tr(),
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontFamily: 'League Spartan',
@@ -70,8 +71,8 @@ class ProfileSuccessScreen extends StatelessWidget {
                       elevation: 5,
                       shadowColor: const Color(0xFF51A77B).withOpacity(0.3),
                     ),
-                    child: const Text(
-                      'Go to Home',
+                    child: Text(
+                      'Go to Home'.tr(),
                       style: TextStyle(fontSize: 20, color: Colors.white, fontWeight: FontWeight.bold),
                     ),
                   ),

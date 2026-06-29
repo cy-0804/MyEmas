@@ -2,43 +2,54 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:intl/intl.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'medication_missed_checker.dart';
 import 'login_screen.dart';
 import 'caregiver_scan_qr_screen.dart';
 import 'caregiver_elderly_detail_screen.dart';
 import 'sos_notification_service.dart';
+import 'location_search_field.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 // ─── colour tokens ────────────────────────────────────────────────────────────
-const _kBlue   = Color(0xFF00539E);
-const _kGreen  = Color(0xFF51A77B);
-const _kDark   = Color(0xFF1A1D2E);
-const _kGrey   = Color(0xFF6C7278);
-const _kBg     = Color(0xFFF0F4F8);
-const _kCard   = Colors.white;
+const _kBlue = Color(0xFF00539E);
+const _kGreen = Color(0xFF51A77B);
+const _kDark = Color(0xFF1A1D2E);
+const _kGrey = Color(0xFF6C7278);
+const _kBg = Color(0xFFF0F4F8);
+const _kCard = Colors.white;
 
 // ─── risk helpers ─────────────────────────────────────────────────────────────
 Color _riskColor(String? r) {
   switch (r) {
-    case 'high':   return const Color(0xFFD32F2F);
-    case 'medium': return const Color(0xFFF57C00);
-    default:       return const Color(0xFF388E3C);
+    case 'high':
+      return const Color(0xFFD32F2F);
+    case 'medium':
+      return const Color(0xFFF57C00);
+    default:
+      return const Color(0xFF388E3C);
   }
 }
 
 Color _riskBg(String? r) {
   switch (r) {
-    case 'high':   return const Color(0xFFFFEBEE);
-    case 'medium': return const Color(0xFFFFF3E0);
-    default:       return const Color(0xFFE8F5E9);
+    case 'high':
+      return const Color(0xFFFFEBEE);
+    case 'medium':
+      return const Color(0xFFFFF3E0);
+    default:
+      return const Color(0xFFE8F5E9);
   }
 }
 
 String _riskLabel(String? r) {
   switch (r) {
-    case 'high':   return 'HIGH RISK';
-    case 'medium': return 'MEDIUM RISK';
-    default:       return 'LOW RISK';
+    case 'high':
+      return 'HIGH RISK'.tr();
+    case 'medium':
+      return 'MEDIUM RISK'.tr();
+    default:
+      return 'LOW RISK'.tr();
   }
 }
 
@@ -89,6 +100,7 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
   bool _loading = true;
   String? _caregiverName;
   Timer? _refreshTimer;
+  Timer? _sosPollTimer; // Fast-polling for SOS alerts (every 10s)
 
   // SOS Alert State
   Map<String, dynamic>? _activeSosAlert;
@@ -98,15 +110,31 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
   @override
   void initState() {
     super.initState();
+    _requestPermissions();
     _loadAll();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 60), (_) => _loadAll());
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 60),
+      (_) => _loadAll(),
+    );
+    // Fast-poll every 10s specifically for SOS alerts as a realtime fallback
+    _sosPollTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => _checkActiveSos(),
+    );
     _subscribeToRealtimeAlerts();
     SosNotificationService().initialize();
+  }
+
+  Future<void> _requestPermissions() async {
+    if (await Permission.notification.isDenied) {
+      await Permission.notification.request();
+    }
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _sosPollTimer?.cancel();
     _sosChannel?.unsubscribe();
     _medLogChannel?.unsubscribe();
     super.dispose();
@@ -121,11 +149,19 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
       if (uid == null) return;
 
       // Caregiver profile
-      final userRow = await db.from('users').select('fullname').eq('user_id', uid).maybeSingle();
-      _caregiverName = userRow?['fullname'] as String? ?? 'Caregiver';
+      final userRow = await db
+          .from('users')
+          .select('fullname')
+          .eq('user_id', uid)
+          .maybeSingle();
+      _caregiverName = userRow?['fullname'] as String? ?? 'Caregiver'.tr();
 
       // Ensure caregiver row
-      final cgRow = await db.from('caregiver').select('user_id').eq('user_id', uid).maybeSingle();
+      final cgRow = await db
+          .from('caregiver')
+          .select('user_id')
+          .eq('user_id', uid)
+          .maybeSingle();
       if (cgRow == null) await db.from('caregiver').insert({'user_id': uid});
 
       // Fetch linked elderly
@@ -137,17 +173,28 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
       final List<LinkedElderly> result = [];
       for (final lk in (links as List)) {
         final eid = lk['elderly_id'] as String;
-        
+
         // Run missed medication check for this elderly
         await MedicationMissedChecker.checkAndMarkMissed(eid);
-        
+
         // User info
-        final uRow = await db.from('users').select('fullname, gender, phone_num, email').eq('user_id', eid).maybeSingle();
+        final uRow = await db
+            .from('users')
+            .select('fullname, gender, phone_num, email')
+            .eq('user_id', eid)
+            .maybeSingle();
         // Elderly health info
-        final eRow = await db.from('elderly').select('blood_type, chronic_condition').eq('user_id', eid).maybeSingle();
+        final eRow = await db
+            .from('elderly')
+            .select('blood_type, chronic_condition')
+            .eq('user_id', eid)
+            .maybeSingle();
         // Latest health record
-        final hRow = await db.from('health_record')
-            .select('record_id, blood_pressure, heart_rate, glucose_level, temperature')
+        final hRow = await db
+            .from('health_record')
+            .select(
+              'record_id, blood_pressure, heart_rate, glucose_level, temperature',
+            )
             .eq('elderly_id', eid)
             .order('recorded_at', ascending: false)
             .limit(1)
@@ -155,7 +202,8 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
 
         String? risk;
         if (hRow != null) {
-          final rRow = await db.from('health_risk_assessment')
+          final rRow = await db
+              .from('health_risk_assessment')
               .select('risk_level')
               .eq('record_id', hRow['record_id'] as String)
               .order('created_at', ascending: false)
@@ -164,32 +212,41 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
           risk = rRow?['risk_level'] as String?;
         }
 
-        result.add(LinkedElderly(
-          elderlyId: eid,
-          name: uRow?['fullname'] as String? ?? 'Unknown',
-          gender: uRow?['gender'] as String?,
-          phone: uRow?['phone_num'] as String?,
-          email: uRow?['email'] as String?,
-          bloodType: eRow?['blood_type'] as String?,
-          chronicCondition: eRow?['chronic_condition'] as String?,
-          latestRisk: risk,
-          latestBP: hRow?['blood_pressure'] as String?,
-          latestHR: hRow?['heart_rate'] as int?,
-          latestGlucose: (hRow?['glucose_level'] as num?)?.toDouble(),
-          latestTemp: (hRow?['temperature'] as num?)?.toDouble(),
-        ));
+        result.add(
+          LinkedElderly(
+            elderlyId: eid,
+            name: uRow?['fullname'] as String? ?? 'Unknown'.tr(),
+            gender: uRow?['gender'] as String?,
+            phone: uRow?['phone_num'] as String?,
+            email: uRow?['email'] as String?,
+            bloodType: eRow?['blood_type'] as String?,
+            chronicCondition: eRow?['chronic_condition'] as String?,
+            latestRisk: risk,
+            latestBP: hRow?['blood_pressure'] as String?,
+            latestHR: hRow?['heart_rate'] as int?,
+            latestGlucose: (hRow?['glucose_level'] as num?)?.toDouble(),
+            latestTemp: (hRow?['temperature'] as num?)?.toDouble(),
+          ),
+        );
       }
 
-      if (mounted) setState(() { _linked = result; _loading = false; });
+      if (mounted) {
+        setState(() {
+          _linked = result;
+          _loading = false;
+        });
+      }
     } catch (e, stack) {
       debugPrint('CaregiverDashboard load error: $e\n$stack');
       if (mounted) {
         setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Error loading data: $e', maxLines: 3),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error loading data: $e'.tr(), maxLines: 3),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
       }
     }
     // Also check active SOS
@@ -203,8 +260,13 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
       if (uid == null) return;
 
       // Get all linked elderly IDs
-      final links = await db.from('care_link').select('elderly_id').eq('caregiver_id', uid);
-      final elderlyIds = (links as List).map((l) => l['elderly_id'] as String).toList();
+      final links = await db
+          .from('care_link')
+          .select('elderly_id')
+          .eq('caregiver_id', uid);
+      final elderlyIds = (links as List)
+          .map((l) => l['elderly_id'] as String)
+          .toList();
       if (elderlyIds.isEmpty) return;
 
       // Check for any SOS with call_status = 'unanswered' from linked elderly
@@ -218,21 +280,37 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
           .maybeSingle();
 
       if (sos != null) {
-        final uRes = await db.from('users').select('fullname').eq('user_id', sos['elderly_id']).maybeSingle();
-        final name = uRes?['fullname'] as String? ?? 'Patient';
-        String location = 'Unknown location';
+        final uRes = await db
+            .from('users')
+            .select('fullname')
+            .eq('user_id', sos['elderly_id'])
+            .maybeSingle();
+        final name = uRes?['fullname'] as String? ?? 'Patient'.tr();
+        String location = 'Unknown location'.tr();
+        String? mapUrl;
         try {
           final loc = jsonDecode(sos['location'] as String);
           location = loc['address'] ?? '${loc['lat']}, ${loc['lng']}';
+          if (loc['lat'] != null && loc['lng'] != null) {
+            mapUrl = 'https://maps.google.com/?q=${loc['lat']},${loc['lng']}';
+          }
         } catch (_) {}
 
         if (mounted) {
-          setState(() => _activeSosAlert = {...sos, 'name': name, 'parsed_location': location});
+          debugPrint('SOS: Found active SOS! Displaying overlay...');
+          setState(
+            () => _activeSosAlert = {
+              ...sos,
+              'name': name,
+              'parsed_location': location,
+            },
+          );
           // Show in-app overlay
           SosNotificationService().showSosOverlay(
             context: context,
             elderlyName: name,
             location: location,
+            mapUrl: mapUrl,
             alertId: sos['alert_id'] as String,
             onConfirm: _respondToSos,
           );
@@ -245,6 +323,7 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
         }
       } else {
         if (mounted) {
+          debugPrint('SOS: No active SOS found.');
           setState(() => _activeSosAlert = null);
           SosNotificationService().dismissSosNotification();
         }
@@ -256,7 +335,7 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
 
   void _subscribeToRealtimeAlerts() {
     final db = Supabase.instance.client;
-    
+
     // 1. SOS Alerts
     _sosChannel = db
         .channel('emergency_logs_changes')
@@ -264,12 +343,125 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'emergency_logs',
-          callback: (payload) {
+          callback: (payload) async {
+            final newLog = payload.newRecord;
+
+            // ── Handle new active SOS alert ──────────────────────────────────
+            if (newLog['status'] == 'active' &&
+                payload.eventType == PostgresChangeEvent.insert) {
+              debugPrint('SOS: Realtime detected NEW active SOS insert!');
+              final elderlyId = newLog['elderly_id'] as String?;
+              if (elderlyId != null &&
+                  _linked.any((le) => le.elderlyId == elderlyId)) {
+                final elderlyName = _linked
+                    .firstWhere((le) => le.elderlyId == elderlyId)
+                    .name;
+                String location = 'Unknown location'.tr();
+                String? mapUrl;
+                try {
+                  final loc = jsonDecode(newLog['location'] as String);
+                  location = loc['address'] ?? '${loc['lat']}, ${loc['lng']}';
+                  if (loc['lat'] != null && loc['lng'] != null) {
+                    mapUrl =
+                        'https://maps.google.com/?q=${loc['lat']},${loc['lng']}';
+                  }
+                } catch (_) {}
+
+                if (mounted) {
+                  final alertId = newLog['alert_id'] as String;
+                  setState(
+                    () => _activeSosAlert = {
+                      ...newLog,
+                      'name': elderlyName,
+                      'parsed_location': location,
+                    },
+                  );
+                  SosNotificationService().showSosOverlay(
+                    context: context,
+                    elderlyName: elderlyName,
+                    location: location,
+                    mapUrl: mapUrl,
+                    alertId: alertId,
+                    onConfirm: _respondToSos,
+                  );
+                  SosNotificationService().startRepeatNotification(
+                    elderlyName: elderlyName,
+                    location: location,
+                    alertId: alertId,
+                  );
+                }
+                return; // Don't call _checkActiveSos again
+              }
+            }
+
+            // ── Handle health missed alert ────────────────────────────────────
+            if (newLog['status'] == 'health_missed' &&
+                payload.eventType == PostgresChangeEvent.insert) {
+              final linkId = newLog['link_id'];
+              if (linkId != null) {
+                final linkRow = await db
+                    .from('care_link')
+                    .select('elderly_id')
+                    .eq('link_id', linkId)
+                    .maybeSingle();
+                if (linkRow != null) {
+                  final eid = linkRow['elderly_id'];
+                  if (_linked.any((le) => le.elderlyId == eid)) {
+                    final elderlyName = _linked
+                        .firstWhere((le) => le.elderlyId == eid)
+                        .name;
+                    SosNotificationService().showCaregiverAlert(
+                      elderlyName: elderlyName,
+                      title: '$elderlyName Missed Health Data',
+                      message: 'Health record was not logged today.'.tr(),
+                      type: CaregiverAlertType.healthMissed,
+                    );
+                  }
+                }
+              }
+            } else if (newLog['status'] != null &&
+                payload.eventType == PostgresChangeEvent.insert) {
+              final status = newLog['status'] as String;
+              if (status.startsWith('Low Stock:') ||
+                  status.startsWith('Expired Medicine:') ||
+                  status.startsWith('Expiring Soon:')) {
+                final linkId = newLog['link_id'];
+                if (linkId != null) {
+                  final linkRow = await db
+                      .from('care_link')
+                      .select('elderly_id')
+                      .eq('link_id', linkId)
+                      .maybeSingle();
+                  if (linkRow != null) {
+                    final eid = linkRow['elderly_id'];
+                    if (_linked.any((le) => le.elderlyId == eid)) {
+                      final elderlyName = _linked
+                          .firstWhere((le) => le.elderlyId == eid)
+                          .name;
+                      SosNotificationService().showCaregiverAlert(
+                        elderlyName: elderlyName,
+                        title:
+                            status.contains('Expired') ||
+                                status.contains('Expiring')
+                            ? '🚫 Medicine Alert — $elderlyName'
+                            : '⚠️ Low Stock — $elderlyName',
+                        message: status,
+                        type:
+                            status.contains('Expired') ||
+                                status.contains('Expiring')
+                            ? CaregiverAlertType.medicineExpired
+                            : CaregiverAlertType.stockLow,
+                      );
+                    }
+                  }
+                }
+              }
+            }
             _checkActiveSos();
           },
         )
         .subscribe();
-        
+
     // 2. Missed Medication Alerts
     _medLogChannel = db
         .channel('medication_logs_changes')
@@ -282,24 +474,36 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
             if (newLog['status'] == 'missed') {
               final medId = newLog['medication_id'];
               if (medId == null) return;
-              
+
               // Fetch medication details
-              final medRow = await db.from('medications').select('name, schedule_id').eq('medication_id', medId).maybeSingle();
+              final medRow = await db
+                  .from('medications')
+                  .select('medication_name, schedule_id')
+                  .eq('medication_id', medId)
+                  .maybeSingle();
               if (medRow == null) return;
-              
-              final schedRow = await db.from('schedule').select('elderly_id').eq('schedule_id', medRow['schedule_id']).maybeSingle();
+
+              final schedRow = await db
+                  .from('schedule')
+                  .select('elderly_id')
+                  .eq('schedule_id', medRow['schedule_id'])
+                  .maybeSingle();
               if (schedRow == null) return;
-              
+
               final eid = schedRow['elderly_id'];
-              
+
               // Check if this elderly is linked to the caregiver
               if (_linked.any((le) => le.elderlyId == eid)) {
-                final elderlyName = _linked.firstWhere((le) => le.elderlyId == eid).name;
-                
-                // Show a regular local notification (not a siren)
-                SosNotificationService().showMedicationNotification(
+                final elderlyName = _linked
+                    .firstWhere((le) => le.elderlyId == eid)
+                    .name;
+
+                // Show a caregiver-specific local notification
+                SosNotificationService().showCaregiverAlert(
                   elderlyName: elderlyName,
-                  message: '${medRow['name']} was not taken today.',
+                  message: '${medRow['medication_name']} was not taken today.'
+                      .tr(),
+                  type: CaregiverAlertType.medicationMissed,
                 );
               }
             }
@@ -313,11 +517,14 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
     try {
       final db = Supabase.instance.client;
       final uid = db.auth.currentUser?.id;
-      await db.from('emergency_logs').update({
-        'status': 'resolved',
-        'caregiver_id': uid,
-        'resolved_at': DateTime.now().toUtc().toIso8601String(),
-      }).eq('alert_id', _activeSosAlert!['alert_id']);
+      await db
+          .from('emergency_logs')
+          .update({
+            'status': 'resolved',
+            'caregiver_id': uid,
+            'resolved_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('alert_id', _activeSosAlert!['alert_id']);
       // Dismiss all notifications and overlay
       await SosNotificationService().dismissSosNotification();
       if (mounted) setState(() => _activeSosAlert = null);
@@ -326,50 +533,24 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
     }
   }
 
-  Future<void> _showDbDebugInfo() async {
-    try {
-      final db = Supabase.instance.client;
-      final hrRes = await db.from('health_record').select('record_id, elderly_id');
-      final schRes = await db.from('schedule').select('schedule_id, elderly_id');
-      final clRes = await db.from('care_link').select('*');
-      final usersRes = await db.from('users').select('user_id, fullname, role_id');
-
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('DB Debug Info'),
-          content: SingleChildScrollView(
-            child: Text(
-              'Total Users: ${(usersRes as List).length}\n'
-              'Total Health Records: ${(hrRes as List).length}\n'
-              'Total Schedules: ${(schRes as List).length}\n'
-              'Total Care Links: ${(clRes as List).length}\n\n'
-              'Care Links:\n${clRes.map((e) => 'Elderly: ${e['elderly_id']}\nCaregiver: ${e['caregiver_id']}').join('\n---\n')}\n\n'
-              'Health Records Elderly IDs:\n${hrRes.map((e) => e['elderly_id']).toSet().join('\n')}\n\n'
-              'Schedule Elderly IDs:\n${schRes.map((e) => e['elderly_id']).toSet().join('\n')}',
-              style: const TextStyle(fontSize: 12),
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))
-          ],
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Debug Error: $e')));
-    }
-  }
-
   // ─── Pages ────────────────────────────────────────────────────────────────
   Widget _buildPage() {
     switch (_navIndex) {
-      case 0: return _PatientsPage(linked: _linked, loading: _loading, onRefresh: _loadAll, onScanTap: _openScanner);
-      case 1: return _MedMonitorPage(linked: _linked, loading: _loading);
-      case 2: return _ScheduleMonitorPage(linked: _linked, loading: _loading);
-      case 3: return _SettingsPage(caregiverName: _caregiverName ?? '');
-      default: return const SizedBox.shrink();
+      case 0:
+        return _PatientsPage(
+          linked: _linked,
+          loading: _loading,
+          onRefresh: _loadAll,
+          onScanTap: _openScanner,
+        );
+      case 1:
+        return _MedMonitorPage(linked: _linked, loading: _loading);
+      case 2:
+        return _ScheduleMonitorPage(linked: _linked, loading: _loading);
+      case 3:
+        return _SettingsPage(caregiverName: _caregiverName ?? '');
+      default:
+        return const SizedBox.shrink();
     }
   }
 
@@ -391,8 +572,7 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
         children: [
           _buildPage(),
           // SOS Emergency Alert Banner
-          if (_activeSosAlert != null)
-            _buildSosBanner(),
+          if (_activeSosAlert != null) _buildSosBanner(),
         ],
       ),
       bottomNavigationBar: _buildNavBar(),
@@ -402,30 +582,33 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
               backgroundColor: _kBlue,
               foregroundColor: Colors.white,
               icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Link Patient', style: TextStyle(fontWeight: FontWeight.bold)),
+              label: Text(
+                'Link Patient'.tr(),
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
             )
-          : _navIndex == 3
-              ? FloatingActionButton.extended(
-                  onPressed: _showDbDebugInfo,
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white,
-                  icon: const Icon(Icons.bug_report),
-                  label: const Text('Debug DB'),
-                )
-              : null,
+          : null,
     );
   }
 
   Widget _buildSosBanner() {
     final alert = _activeSosAlert!;
-    final name = alert['name'] ?? 'Patient';
-    final location = alert['parsed_location'] as String? ?? 'Unknown location';
+    final name = alert['name'] ?? 'Patient'.tr();
+    final location =
+        alert['parsed_location'] as String? ?? 'Unknown location'.tr();
     final time = alert['timestamp'] != null
-        ? DateFormat('h:mm a').format(DateTime.parse(alert['timestamp'] as String).toLocal())
+        ? DateFormat('h:mm a').format(
+            DateTime.parse(
+              alert['timestamp'].toString() +
+                  (alert['timestamp'].toString().endsWith('Z') ? '' : 'Z'),
+            ).toLocal(),
+          )
         : '';
 
     return Positioned(
-      top: 0, left: 0, right: 0,
+      top: 0,
+      left: 0,
+      right: 0,
       child: SafeArea(
         child: GestureDetector(
           onTap: () => _respondToSos(),
@@ -435,42 +618,97 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
             decoration: BoxDecoration(
               color: const Color(0xFFB71C1C),
               borderRadius: BorderRadius.circular(16),
-              boxShadow: [BoxShadow(color: Colors.red.withValues(alpha: 0.5), blurRadius: 20, spreadRadius: 4)],
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.red.withValues(alpha: 0.5),
+                  blurRadius: 20,
+                  spreadRadius: 4,
+                ),
+              ],
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 22),
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
                     const SizedBox(width: 8),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        '🚨  SOS EMERGENCY ALERT',
-                        style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 1),
+                        '🚨  SOS EMERGENCY ALERT'.tr(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1,
+                        ),
                       ),
                     ),
-                    Text(time, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    Text(
+                      time,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 8),
-                Text('$name needs help!', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                Text(
+                  '$name needs help!'.tr(),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
                 const SizedBox(height: 4),
-                Row(children: [
-                  const Icon(Icons.location_on_outlined, color: Colors.white70, size: 14),
-                  const SizedBox(width: 4),
-                  Expanded(child: Text(location, style: const TextStyle(color: Colors.white70, fontSize: 13), maxLines: 2)),
-                ]),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.location_on_outlined,
+                      color: Colors.white70,
+                      size: 14,
+                    ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        location,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                        ),
+                        maxLines: 2,
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
                     onPressed: _respondToSos,
-                    icon: const Icon(Icons.check_circle_outline, color: Color(0xFFB71C1C), size: 18),
-                    label: const Text('I am Responding — Mark as Resolved', style: TextStyle(color: Color(0xFFB71C1C), fontWeight: FontWeight.bold)),
+                    icon: const Icon(
+                      Icons.check_circle_outline,
+                      color: Color(0xFFB71C1C),
+                      size: 18,
+                    ),
+                    label: Text(
+                      'I am Responding — Mark as Resolved'.tr(),
+                      style: const TextStyle(
+                        color: Color(0xFFB71C1C),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
                       elevation: 0,
                     ),
                   ),
@@ -484,17 +722,39 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
   }
 
   Widget _buildNavBar() {
-    const items = [
-      (icon: Icons.people_outline, activeIcon: Icons.people, label: 'Patients'),
-      (icon: Icons.medication_outlined, activeIcon: Icons.medication, label: 'Medication'),
-      (icon: Icons.calendar_today_outlined, activeIcon: Icons.calendar_today, label: 'Schedule'),
-      (icon: Icons.settings_outlined, activeIcon: Icons.settings, label: 'Settings'),
+    final items = [
+      (
+        icon: Icons.people_outline,
+        activeIcon: Icons.people,
+        label: 'Patients'.tr(),
+      ),
+      (
+        icon: Icons.medication_outlined,
+        activeIcon: Icons.medication,
+        label: 'Medication'.tr(),
+      ),
+      (
+        icon: Icons.calendar_today_outlined,
+        activeIcon: Icons.calendar_today,
+        label: 'Schedule'.tr(),
+      ),
+      (
+        icon: Icons.settings_outlined,
+        activeIcon: Icons.settings,
+        label: 'Settings'.tr(),
+      ),
     ];
 
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 12, offset: const Offset(0, -2))],
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 12,
+            offset: const Offset(0, -2),
+          ),
+        ],
       ),
       child: SafeArea(
         top: false,
@@ -518,22 +778,53 @@ class _CaregiverDashboardState extends State<CaregiverDashboard> {
                       ),
                     ),
                   ),
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Stack(clipBehavior: Clip.none, children: [
-                      Icon(sel ? item.activeIcon : item.icon, color: sel ? _kBlue : Colors.grey.shade400, size: 24),
-                      if (showBadge)
-                        Positioned(
-                          right: -6, top: -4,
-                          child: Container(
-                            width: 14, height: 14,
-                            decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
-                            child: Center(child: Text('$_alertCount', style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold))),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Icon(
+                            sel ? item.activeIcon : item.icon,
+                            color: sel ? _kBlue : Colors.grey.shade400,
+                            size: 24,
                           ),
+                          if (showBadge)
+                            Positioned(
+                              right: -6,
+                              top: -4,
+                              child: Container(
+                                width: 14,
+                                height: 14,
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFFD32F2F),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    '$_alertCount',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        item.label,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: sel ? FontWeight.bold : FontWeight.w500,
+                          color: sel ? _kBlue : Colors.grey.shade400,
                         ),
-                    ]),
-                    const SizedBox(height: 3),
-                    Text(item.label, style: TextStyle(fontSize: 11, fontWeight: sel ? FontWeight.bold : FontWeight.w500, color: sel ? _kBlue : Colors.grey.shade400)),
-                  ]),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             );
@@ -553,27 +844,38 @@ class _PatientsPage extends StatelessWidget {
   final VoidCallback onRefresh;
   final VoidCallback onScanTap;
 
-  const _PatientsPage({required this.linked, required this.loading, required this.onRefresh, required this.onScanTap});
+  const _PatientsPage({
+    required this.linked,
+    required this.loading,
+    required this.onRefresh,
+    required this.onScanTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      body: CustomScrollView(slivers: [
-        _buildAppBar(context),
-        if (loading)
-          const SliverFillRemaining(child: Center(child: CircularProgressIndicator(color: _kBlue)))
-        else if (linked.isEmpty)
-          SliverFillRemaining(child: _EmptyLinked(onScan: onScanTap))
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
-            sliver: SliverList(delegate: SliverChildBuilderDelegate(
-              (ctx, i) => _PatientCard(elderly: linked[i]),
-              childCount: linked.length,
-            )),
-          ),
-      ]),
+      body: CustomScrollView(
+        slivers: [
+          _buildAppBar(context),
+          if (loading)
+            const SliverFillRemaining(
+              child: Center(child: CircularProgressIndicator(color: _kBlue)),
+            )
+          else if (linked.isEmpty)
+            SliverFillRemaining(child: _EmptyLinked(onScan: onScanTap))
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (ctx, i) => _PatientCard(elderly: linked[i]),
+                  childCount: linked.length,
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -597,25 +899,69 @@ class _PatientsPage extends StatelessWidget {
           child: SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('Caregiver Hub', style: TextStyle(fontFamily: 'League Spartan', fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white.withValues(alpha: 0.95))),
-                    const SizedBox(height: 2),
-                    Text('${linked.length} patient${linked.length != 1 ? 's' : ''} linked', style: TextStyle(color: Colors.white.withValues(alpha: 0.7), fontSize: 13)),
-                  ]),
-                  if (highRisk > 0)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(color: const Color(0xFFD32F2F).withValues(alpha: 0.9), borderRadius: BorderRadius.circular(10)),
-                      child: Row(children: [
-                        const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 14),
-                        const SizedBox(width: 4),
-                        Text('$highRisk HIGH RISK', style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
-                      ]),
-                    ),
-                ]),
-              ]),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Caregiver Hub'.tr(),
+                            style: TextStyle(
+                              fontFamily: 'League Spartan',
+                              fontSize: 26,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white.withValues(alpha: 0.95),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '${linked.length} patient${linked.length != 1 ? 's' : ''} linked',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.7),
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (highRisk > 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(
+                              0xFFD32F2F,
+                            ).withValues(alpha: 0.9),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.warning_amber_rounded,
+                                color: Colors.white,
+                                size: 14,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                '$highRisk HIGH RISK',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -638,7 +984,12 @@ class _PatientCard extends StatelessWidget {
     final rl = _riskLabel(elderly.latestRisk);
 
     return GestureDetector(
-      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => CaregiverElderlyDetailScreen(elderly: elderly))),
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CaregiverElderlyDetailScreen(elderly: elderly),
+        ),
+      ),
       child: Container(
         margin: const EdgeInsets.only(bottom: 14),
         padding: const EdgeInsets.all(16),
@@ -646,44 +997,125 @@ class _PatientCard extends StatelessWidget {
           color: _kCard,
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: rc.withValues(alpha: 0.15), width: 1.5),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, 3))],
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
+          ],
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // Header row
-          Row(children: [
-            CircleAvatar(
-              radius: 26,
-              backgroundColor: _kBlue.withValues(alpha: 0.12),
-              child: Text(elderly.name.isNotEmpty ? elderly.name[0].toUpperCase() : '?',
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: _kBlue)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header row
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 26,
+                  backgroundColor: _kBlue.withValues(alpha: 0.12),
+                  child: Text(
+                    elderly.name.isNotEmpty
+                        ? elderly.name[0].toUpperCase()
+                        : '?',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: _kBlue,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        elderly.name,
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.bold,
+                          color: _kDark,
+                        ),
+                      ),
+                      if (elderly.chronicCondition != null &&
+                          elderly.chronicCondition!.isNotEmpty)
+                        Text(
+                          elderly.chronicCondition!,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade500,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: rb,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: rc.withValues(alpha: 0.3)),
+                  ),
+                  child: Text(
+                    rl,
+                    style: TextStyle(
+                      color: rc,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 12),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(elderly.name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: _kDark)),
-              if (elderly.chronicCondition != null && elderly.chronicCondition!.isNotEmpty)
-                Text(elderly.chronicCondition!, style: TextStyle(fontSize: 12, color: Colors.grey.shade500), maxLines: 1, overflow: TextOverflow.ellipsis),
-            ])),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-              decoration: BoxDecoration(color: rb, borderRadius: BorderRadius.circular(8), border: Border.all(color: rc.withValues(alpha: 0.3))),
-              child: Text(rl, style: TextStyle(color: rc, fontSize: 10, fontWeight: FontWeight.bold)),
-            ),
-          ]),
 
-          // Vital pills
-          const SizedBox(height: 14),
-          Row(children: [
-            _vitalPill(Icons.show_chart, elderly.latestBP ?? '–', 'mmHg', Colors.blue.shade600),
-            const SizedBox(width: 8),
-            _vitalPill(Icons.favorite_border, elderly.latestHR != null ? '${elderly.latestHR}' : '–', 'bpm', Colors.red.shade400),
-            const SizedBox(width: 8),
-            _vitalPill(Icons.thermostat, elderly.latestTemp?.toStringAsFixed(1) ?? '–', '°C', Colors.orange.shade600),
-          ]),
-          const SizedBox(height: 8),
-          Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-            Text('View full details →', style: TextStyle(fontSize: 12, color: _kBlue.withValues(alpha: 0.8), fontWeight: FontWeight.w600)),
-          ]),
-        ]),
+            // Vital pills
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                _vitalPill(
+                  Icons.show_chart,
+                  elderly.latestBP ?? '–',
+                  'mmHg',
+                  Colors.blue.shade600,
+                ),
+                const SizedBox(width: 8),
+                _vitalPill(
+                  Icons.favorite_border,
+                  elderly.latestHR != null ? '${elderly.latestHR}' : '–',
+                  'bpm',
+                  Colors.red.shade400,
+                ),
+                const SizedBox(width: 8),
+                _vitalPill(
+                  Icons.thermostat,
+                  elderly.latestTemp?.toStringAsFixed(1) ?? '–',
+                  '°C',
+                  Colors.orange.shade600,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Text(
+                  'View full details →'.tr(),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _kBlue.withValues(alpha: 0.8),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -692,12 +1124,27 @@ class _PatientCard extends StatelessWidget {
     return Expanded(
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 8),
-        decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(10)),
-        child: Row(children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 4),
-          Expanded(child: Text('$val $unit', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color), overflow: TextOverflow.ellipsis)),
-        ]),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                '$val $unit',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -712,29 +1159,56 @@ class _EmptyLinked extends StatelessWidget {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(40),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 100, height: 100,
-            decoration: BoxDecoration(color: _kBlue.withValues(alpha: 0.08), shape: BoxShape.circle),
-            child: const Icon(Icons.people_outline, size: 52, color: _kBlue),
-          ),
-          const SizedBox(height: 24),
-          const Text('No patients linked yet', style: TextStyle(fontFamily: 'League Spartan', fontSize: 22, fontWeight: FontWeight.bold, color: _kDark)),
-          const SizedBox(height: 10),
-          const Text('Scan an elderly patient\'s QR code to start monitoring their health data remotely.',
-              textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: _kGrey, height: 1.5)),
-          const SizedBox(height: 28),
-          ElevatedButton.icon(
-            onPressed: onScan,
-            icon: const Icon(Icons.qr_code_scanner, size: 20),
-            label: const Text('Scan QR Code', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _kBlue, foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 100,
+              height: 100,
+              decoration: BoxDecoration(
+                color: _kBlue.withValues(alpha: 0.08),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.people_outline, size: 52, color: _kBlue),
             ),
-          ),
-        ]),
+            const SizedBox(height: 24),
+            Text(
+              'No patients linked yet'.tr(),
+              style: TextStyle(
+                fontFamily: 'League Spartan',
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: _kDark,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Scan an elderly patient\'s QR code to start monitoring their health data remotely.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: _kGrey, height: 1.5),
+            ),
+            const SizedBox(height: 28),
+            ElevatedButton.icon(
+              onPressed: onScan,
+              icon: const Icon(Icons.qr_code_scanner, size: 20),
+              label: Text(
+                'Scan QR Code'.tr(),
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _kBlue,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 28,
+                  vertical: 14,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -781,22 +1255,42 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
 
       for (final el in widget.linked) {
         // Get schedule IDs for this elderly
-        final schedRes = await db.from('schedule').select('schedule_id').eq('elderly_id', el.elderlyId);
-        final schedIds = (schedRes as List).map((s) => s['schedule_id'] as String).toList();
+        final schedRes = await db
+            .from('schedule')
+            .select('schedule_id')
+            .eq('elderly_id', el.elderlyId);
+        final schedIds = (schedRes as List)
+            .map((s) => s['schedule_id'] as String)
+            .toList();
 
         List<Map<String, dynamic>> meds = [];
         List<Map<String, dynamic>> logs = [];
 
         if (schedIds.isNotEmpty) {
-          final medRes = await db.from('medications').select().inFilter('schedule_id', schedIds);
+          final medRes = await db
+              .from('medications')
+              .select()
+              .inFilter('schedule_id', schedIds);
           meds = (medRes as List).cast<Map<String, dynamic>>();
 
           if (meds.isNotEmpty) {
-            final medIds = meds.map((m) => m['medication_id'] as String).toList();
+            final medIds = meds
+                .map((m) => m['medication_id'] as String)
+                .toList();
             final today = DateTime.now();
-            final start = DateTime(today.year, today.month, today.day).toUtc().toIso8601String();
-            final end   = DateTime(today.year, today.month, today.day + 1).toUtc().toIso8601String();
-            final logRes = await db.from('medication_logs').select()
+            final start = DateTime(
+              today.year,
+              today.month,
+              today.day,
+            ).toUtc().toIso8601String();
+            final end = DateTime(
+              today.year,
+              today.month,
+              today.day + 1,
+            ).toUtc().toIso8601String();
+            final logRes = await db
+                .from('medication_logs')
+                .select()
                 .inFilter('medication_id', medIds)
                 .gte('logged_at', start)
                 .lt('logged_at', end);
@@ -808,12 +1302,23 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
         logsMap[el.elderlyId] = logs;
       }
 
-      if (mounted) setState(() { _medsByElderly = medsMap; _logsByElderly = logsMap; _loading = false; });
+      if (mounted) {
+        setState(() {
+          _medsByElderly = medsMap;
+          _logsByElderly = logsMap;
+          _loading = false;
+        });
+      }
     } catch (e) {
       debugPrint('MedMonitorPage load error: $e');
       if (mounted) {
         setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Med Monitor Error: $e'), backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Med Monitor Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     }
   }
@@ -822,25 +1327,44 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      body: CustomScrollView(slivers: [
-        _sliverHeader('Medication Monitor', Icons.medication, 'Today\'s medications for all patients', _kBlue),
-        if (widget.loading || _loading)
-          const SliverFillRemaining(child: Center(child: CircularProgressIndicator(color: _kBlue)))
-        else if (widget.linked.isEmpty)
-          const SliverFillRemaining(child: Center(child: _NoPatientHint(msg: 'Link patients to see their medications')))
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
-            sliver: SliverList(
-              delegate: SliverChildBuilderDelegate((ctx, i) {
-                final el = widget.linked[i];
-                final meds = _medsByElderly[el.elderlyId] ?? [];
-                final logs = _logsByElderly[el.elderlyId] ?? [];
-                return _ElderlyMedSection(elderly: el, medications: meds, todayLogs: logs);
-              }, childCount: widget.linked.length),
-            ),
+      body: CustomScrollView(
+        slivers: [
+          _sliverHeader(
+            'Medication Monitor',
+            Icons.medication,
+            'Today\'s medications for all patients',
+            _kBlue,
           ),
-      ]),
+          if (widget.loading || _loading)
+            const SliverFillRemaining(
+              child: Center(child: CircularProgressIndicator(color: _kBlue)),
+            )
+          else if (widget.linked.isEmpty)
+            const SliverFillRemaining(
+              child: Center(
+                child: _NoPatientHint(
+                  msg: 'Link patients to see their medications',
+                ),
+              ),
+            )
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate((ctx, i) {
+                  final el = widget.linked[i];
+                  final meds = _medsByElderly[el.elderlyId] ?? [];
+                  final logs = _logsByElderly[el.elderlyId] ?? [];
+                  return _ElderlyMedSection(
+                    elderly: el,
+                    medications: meds,
+                    todayLogs: logs,
+                  );
+                }, childCount: widget.linked.length),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -850,85 +1374,285 @@ class _ElderlyMedSection extends StatelessWidget {
   final List<Map<String, dynamic>> medications;
   final List<Map<String, dynamic>> todayLogs;
 
-  const _ElderlyMedSection({required this.elderly, required this.medications, required this.todayLogs});
+  const _ElderlyMedSection({
+    required this.elderly,
+    required this.medications,
+    required this.todayLogs,
+  });
+
+  // ── session ordering ──────────────────────────────────────────────────────
+  static const _sessionOrder = [
+    'Morning',
+    'Afternoon',
+    'Evening',
+    'Night',
+    'As needed',
+  ];
+
+  static const _sessionIcons = {
+    'Morning': Icons.wb_sunny_outlined,
+    'Afternoon': Icons.wb_cloudy_outlined,
+    'Evening': Icons.nights_stay_outlined,
+    'Night': Icons.bedtime_outlined,
+    'As needed': Icons.access_time,
+  };
+
+  static const _sessionColors = {
+    'Morning': Color(0xFFF57C00),
+    'Afternoon': Color(0xFF0288D1),
+    'Evening': Color(0xFF7B1FA2),
+    'Night': Color(0xFF37474F),
+    'As needed': Color(0xFF00796B),
+  };
+
+  String _sessionKey(String? val) {
+    if (val == null || val.isEmpty) return 'As needed';
+    if (val == 'Morning') return 'Morning';
+    if (val == 'Afternoon') return 'Afternoon';
+    if (val == 'Evening') return 'Evening';
+    if (val == 'Night') return 'Night';
+    // Time strings → classify by hour
+    if (val.contains(':')) {
+      try {
+        final h = int.parse(val.split(':')[0]);
+        if (h >= 5 && h < 12) return 'Morning';
+        if (h >= 12 && h < 17) return 'Afternoon';
+        if (h >= 17 && h < 21) return 'Evening';
+        return 'Night';
+      } catch (_) {}
+    }
+    return 'As needed';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final takenIds = todayLogs.where((l) => l['status'] == 'taken').map((l) => l['medication_id'] as String).toSet();
-    final taken = medications.where((m) => takenIds.contains(m['medication_id'])).length;
+    final takenIds = todayLogs
+        .where((l) => l['status'] == 'taken')
+        .map((l) => l['medication_id'] as String)
+        .toSet();
+    final taken = medications
+        .where((m) => takenIds.contains(m['medication_id']))
+        .length;
 
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const SizedBox(height: 16),
-      // Elderly header
-      Row(children: [
-        CircleAvatar(radius: 18, backgroundColor: _kBlue.withValues(alpha: 0.1),
-            child: Text(elderly.name[0].toUpperCase(), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _kBlue))),
-        const SizedBox(width: 10),
-        Expanded(child: Text(elderly.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _kDark))),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          decoration: BoxDecoration(color: _kGreen.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
-          child: Text('$taken / ${medications.length} taken',
-              style: const TextStyle(color: _kGreen, fontSize: 12, fontWeight: FontWeight.bold)),
-        ),
-      ]),
-      const SizedBox(height: 10),
+    // Group by session
+    final Map<String, List<Map<String, dynamic>>> grouped = {};
+    for (final med in medications) {
+      final key = _sessionKey(med['when_to_take'] as String?);
+      grouped.putIfAbsent(key, () => []).add(med);
+    }
+    // Build in defined order, skip empty sessions
+    final sessions = _sessionOrder
+        .where((s) => grouped.containsKey(s))
+        .toList();
 
-      if (medications.isEmpty)
-        _infoCard('No medications registered')
-      else
-        ...medications.map((med) {
-          final medId = med['medication_id'] as String;
-          final isTaken = takenIds.contains(medId);
-          final missedLog = todayLogs.any((l) => l['medication_id'] == medId && l['status'] == 'missed');
-          final name = med['medication_name'] as String? ?? 'Unknown';
-          final dosage = med['dosage'] as String? ?? '';
-          final when = _formatWhen(med['when_to_take'] as String?);
-          final stock = med['medication_stock'] as int?;
-
-          return Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: isTaken ? _kGreen.withValues(alpha: 0.3) : (missedLog ? Colors.red.withValues(alpha: 0.3) : Colors.grey.shade200)),
-              boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 4)],
-            ),
-            child: Row(children: [
-              Container(
-                width: 44, height: 44,
-                decoration: BoxDecoration(
-                  color: isTaken ? _kGreen.withValues(alpha: 0.12) : _kBlue.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(12),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 16),
+        // Elderly header
+        Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: _kBlue.withValues(alpha: 0.1),
+              child: Text(
+                elderly.name[0].toUpperCase(),
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: _kBlue,
                 ),
-                child: Icon(Icons.medication, color: isTaken ? _kGreen : _kBlue, size: 24),
               ),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: _kDark)),
-                const SizedBox(height: 2),
-                Text('$dosage · $when', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-                if (stock != null) Text('Stock: $stock', style: TextStyle(fontSize: 11, color: stock <= 3 ? Colors.red : Colors.grey.shade400)),
-              ])),
-              _StatusBadge(taken: isTaken, missed: missedLog),
-            ]),
-          );
-        }),
-      const Divider(height: 8),
-    ]);
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                elderly.name,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: _kDark,
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: _kGreen.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '$taken / ${medications.length} taken',
+                style: const TextStyle(
+                  color: _kGreen,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+
+        if (medications.isEmpty)
+          _infoCard('No medications registered')
+        else
+          ...sessions.map((session) {
+            final meds = grouped[session]!;
+            final color = _sessionColors[session] ?? _kBlue;
+            final icon = _sessionIcons[session] ?? Icons.access_time;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Session header
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8, top: 4),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(icon, size: 16, color: color),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        session,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: color,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Divider(
+                          color: color.withValues(alpha: 0.25),
+                          thickness: 1,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Med cards in this session
+                ...meds.map((med) {
+                  final medId = med['medication_id'] as String;
+                  final isTaken = takenIds.contains(medId);
+                  final missedLog = todayLogs.any(
+                    (l) =>
+                        l['medication_id'] == medId && l['status'] == 'missed',
+                  );
+                  final name = med['medication_name'] as String? ?? 'Unknown';
+                  final dosage = med['dosage'] as String? ?? '';
+                  final when = _formatWhen(med['when_to_take'] as String?);
+                  final stock = med['medication_stock'] as int?;
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: isTaken
+                            ? _kGreen.withValues(alpha: 0.3)
+                            : (missedLog
+                                  ? Colors.red.withValues(alpha: 0.3)
+                                  : Colors.grey.shade200),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.02),
+                          blurRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: isTaken
+                                ? _kGreen.withValues(alpha: 0.12)
+                                : color.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(
+                            Icons.medication,
+                            color: isTaken ? _kGreen : color,
+                            size: 24,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 15,
+                                  color: _kDark,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                dosage.isNotEmpty ? '$dosage · $when' : when,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                ),
+                              ),
+                              if (stock != null)
+                                Text(
+                                  'Stock: $stock',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: stock <= 3
+                                        ? Colors.red
+                                        : Colors.grey.shade400,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        _StatusBadge(taken: isTaken, missed: missedLog),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            );
+          }),
+        const Divider(height: 8),
+      ],
+    );
   }
 
   Widget _infoCard(String msg) {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
-      child: Row(children: [
-        Icon(Icons.info_outline, color: Colors.grey.shade400, size: 18),
-        const SizedBox(width: 8),
-        Text(msg, style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
-      ]),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline, color: Colors.grey.shade400, size: 18),
+          const SizedBox(width: 8),
+          Text(
+            msg,
+            style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+          ),
+        ],
+      ),
     );
   }
 
@@ -958,33 +1682,72 @@ class _StatusBadge extends StatelessWidget {
     if (taken) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(color: _kGreen.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
-        child: const Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.check_circle, color: _kGreen, size: 14),
-          SizedBox(width: 4),
-          Text('Taken', style: TextStyle(color: _kGreen, fontSize: 12, fontWeight: FontWeight.bold)),
-        ]),
+        decoration: BoxDecoration(
+          color: _kGreen.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check_circle, color: _kGreen, size: 14),
+            SizedBox(width: 4),
+            Text(
+              'Taken'.tr(),
+              style: TextStyle(
+                color: _kGreen,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
       );
     }
     if (missed) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(color: Colors.red.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
-        child: const Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.cancel_outlined, color: Colors.red, size: 14),
-          SizedBox(width: 4),
-          Text('Missed', style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold)),
-        ]),
+        decoration: BoxDecoration(
+          color: Colors.red.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cancel_outlined, color: Colors.red, size: 14),
+            SizedBox(width: 4),
+            Text(
+              'Missed'.tr(),
+              style: TextStyle(
+                color: Colors.red,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
       );
     }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(color: Colors.orange.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
-      child: const Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.pending_outlined, color: Colors.orange, size: 14),
-        SizedBox(width: 4),
-        Text('Pending', style: TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
-      ]),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.pending_outlined, color: Colors.orange, size: 14),
+          SizedBox(width: 4),
+          Text(
+            'Pending'.tr(),
+            style: TextStyle(
+              color: Colors.orange,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1026,11 +1789,21 @@ class _ScheduleMonitorPageState extends State<_ScheduleMonitorPage> {
       final Map<String, List<Map<String, dynamic>>> result = {};
 
       // Fetch 7-day window around selected date
-      final start = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day - 3).toUtc().toIso8601String();
-      final end   = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day + 4).toUtc().toIso8601String();
+      final start = DateTime(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day - 3,
+      ).toUtc().toIso8601String();
+      final end = DateTime(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day + 4,
+      ).toUtc().toIso8601String();
 
       for (final el in widget.linked) {
-        final res = await db.from('schedule').select()
+        final res = await db
+            .from('schedule')
+            .select()
             .eq('elderly_id', el.elderlyId)
             .gte('schedule_date_time', start)
             .lte('schedule_date_time', end)
@@ -1038,12 +1811,22 @@ class _ScheduleMonitorPageState extends State<_ScheduleMonitorPage> {
         result[el.elderlyId] = (res as List).cast<Map<String, dynamic>>();
       }
 
-      if (mounted) setState(() { _schedulesByElderly = result; _loading = false; });
+      if (mounted) {
+        setState(() {
+          _schedulesByElderly = result;
+          _loading = false;
+        });
+      }
     } catch (e) {
       debugPrint('ScheduleMonitorPage load error: $e');
       if (mounted) {
         setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Schedule Monitor Error: $e'), backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Schedule Monitor Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     }
   }
@@ -1052,36 +1835,81 @@ class _ScheduleMonitorPageState extends State<_ScheduleMonitorPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      body: CustomScrollView(slivers: [
-        _sliverHeader('Schedule Monitor', Icons.calendar_today, DateFormat('EEEE, d MMMM').format(_selectedDate), _kBlue),
-        // Date strip
-        SliverToBoxAdapter(child: _buildDateStrip()),
-        if (widget.loading || _loading)
-          const SliverFillRemaining(child: Center(child: CircularProgressIndicator(color: _kBlue)))
-        else if (widget.linked.isEmpty)
-          const SliverFillRemaining(child: Center(child: _NoPatientHint(msg: 'Link patients to see their schedule')))
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
-            sliver: SliverList(
-              delegate: SliverChildBuilderDelegate((ctx, i) {
-                final el = widget.linked[i];
-                final items = _schedulesByElderly[el.elderlyId] ?? [];
-                // Filter to selected date
-                final todayItems = items.where((s) {
-                  final dt = DateTime.parse(s['schedule_date_time'] as String).toLocal();
-                  return dt.year == _selectedDate.year && dt.month == _selectedDate.month && dt.day == _selectedDate.day;
-                }).toList();
-                return _ElderlyScheduleSection(elderly: el, schedules: todayItems);
-              }, childCount: widget.linked.length),
-            ),
+      body: CustomScrollView(
+        slivers: [
+          _sliverHeader(
+            'Schedule Monitor',
+            Icons.calendar_today,
+            DateFormat('EEEE, d MMMM').format(_selectedDate),
+            _kBlue,
           ),
-      ]),
+          // Date strip
+          SliverToBoxAdapter(child: _buildDateStrip()),
+          if (widget.loading || _loading)
+            const SliverFillRemaining(
+              child: Center(child: CircularProgressIndicator(color: _kBlue)),
+            )
+          else if (widget.linked.isEmpty)
+            const SliverFillRemaining(
+              child: Center(
+                child: _NoPatientHint(
+                  msg: 'Link patients to see their schedule',
+                ),
+              ),
+            )
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate((ctx, i) {
+                  final el = widget.linked[i];
+                  final items = _schedulesByElderly[el.elderlyId] ?? [];
+                  // Filter to selected date and exclude Medication-type entries
+                  final todayItems = items.where((s) {
+                    final raw = s['schedule_date_time'] as String;
+                    final dt = raw.endsWith('Z')
+                        ? DateTime.parse(raw).toLocal()
+                        : DateTime.parse('${raw}Z').toLocal();
+                    if (!(dt.year == _selectedDate.year &&
+                        dt.month == _selectedDate.month &&
+                        dt.day == _selectedDate.day)) {
+                      return false;
+                    }
+                    // Exclude medication schedule entries
+                    try {
+                      final notes = s['notes'] as String? ?? '';
+                      const marker = '\n\n__METADATA__:';
+                      if (notes.contains(marker)) {
+                        final parts = notes.split(marker);
+                        if (parts.length > 1) {
+                          final meta =
+                              jsonDecode(parts.sublist(1).join(marker))
+                                  as Map<String, dynamic>;
+                          if ((meta['type'] as String?) == 'Medication') {
+                            return false;
+                          }
+                        }
+                      }
+                    } catch (_) {}
+                    return true;
+                  }).toList();
+                  return _ElderlyScheduleSection(
+                    elderly: el,
+                    schedules: todayItems,
+                  );
+                }, childCount: widget.linked.length),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
   Widget _buildDateStrip() {
-    final days = List.generate(7, (i) => DateTime.now().add(Duration(days: i - 3)));
+    final days = List.generate(
+      7,
+      (i) => DateTime.now().add(Duration(days: i - 3)),
+    );
     return Container(
       height: 80,
       color: Colors.white,
@@ -1092,22 +1920,48 @@ class _ScheduleMonitorPageState extends State<_ScheduleMonitorPage> {
         itemCount: days.length,
         itemBuilder: (_, i) {
           final d = days[i];
-          final sel = d.year == _selectedDate.year && d.month == _selectedDate.month && d.day == _selectedDate.day;
+          final sel =
+              d.year == _selectedDate.year &&
+              d.month == _selectedDate.month &&
+              d.day == _selectedDate.day;
           return GestureDetector(
-            onTap: () { setState(() => _selectedDate = d); _load(); },
+            onTap: () {
+              setState(() => _selectedDate = d);
+              _load();
+            },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              width: 52, margin: const EdgeInsets.symmetric(horizontal: 4),
+              width: 52,
+              margin: const EdgeInsets.symmetric(horizontal: 4),
               decoration: BoxDecoration(
                 color: sel ? _kBlue : Colors.grey.shade50,
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: sel ? _kBlue : Colors.grey.shade200),
               ),
-              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                Text(DateFormat('E').format(d), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: sel ? Colors.white.withValues(alpha: 0.8) : Colors.grey.shade500)),
-                const SizedBox(height: 2),
-                Text('${d.day}', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: sel ? Colors.white : _kDark)),
-              ]),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    DateFormat('E').format(d),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: sel
+                          ? Colors.white.withValues(alpha: 0.8)
+                          : Colors.grey.shade500,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${d.day}',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: sel ? Colors.white : _kDark,
+                    ),
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -1120,41 +1974,86 @@ class _ElderlyScheduleSection extends StatelessWidget {
   final LinkedElderly elderly;
   final List<Map<String, dynamic>> schedules;
 
-  const _ElderlyScheduleSection({required this.elderly, required this.schedules});
+  const _ElderlyScheduleSection({
+    required this.elderly,
+    required this.schedules,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const SizedBox(height: 16),
-      Row(children: [
-        CircleAvatar(radius: 18, backgroundColor: _kBlue.withValues(alpha: 0.1),
-            child: Text(elderly.name[0].toUpperCase(), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _kBlue))),
-        const SizedBox(width: 10),
-        Expanded(child: Text(elderly.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _kDark))),
-        Text('${schedules.length} event${schedules.length != 1 ? 's' : ''}',
-            style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-      ]),
-      const SizedBox(height: 10),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: _kBlue.withValues(alpha: 0.1),
+              child: Text(
+                elderly.name[0].toUpperCase(),
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: _kBlue,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                elderly.name,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: _kDark,
+                ),
+              ),
+            ),
+            Text(
+              '${schedules.length} event${schedules.length != 1 ? 's' : ''}',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
 
-      if (schedules.isEmpty)
-        Container(
-          margin: const EdgeInsets.only(bottom: 12),
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
-          child: Row(children: [
-            Icon(Icons.event_available, color: Colors.grey.shade400, size: 18),
-            const SizedBox(width: 8),
-            Text('No events today', style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
-          ]),
-        )
-      else
-        ...schedules.map((s) => _buildScheduleCard(s)),
-      const Divider(height: 8),
-    ]);
+        if (schedules.isEmpty)
+          Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.grey.shade200),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.event_available,
+                  color: Colors.grey.shade400,
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'No events today'.tr(),
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                ),
+              ],
+            ),
+          )
+        else
+          ...schedules.map((s) => _buildScheduleCard(s)),
+        const Divider(height: 8),
+      ],
+    );
   }
 
   Widget _buildScheduleCard(Map<String, dynamic> s) {
-    final dt = DateTime.parse(s['schedule_date_time'] as String).toLocal();
+    final raw = s['schedule_date_time'] as String;
+    final dt = raw.endsWith('Z')
+        ? DateTime.parse(raw).toLocal()
+        : DateTime.parse('${raw}Z').toLocal();
     final title = s['title'] as String? ?? 'Untitled';
     final location = s['location'] as String?;
     final notes = s['notes'] as String? ?? '';
@@ -1168,7 +2067,8 @@ class _ElderlyScheduleSection extends StatelessWidget {
       if (notes.contains(marker)) {
         final parts = notes.split(marker);
         if (parts.length > 1) {
-          final meta = jsonDecode(parts.sublist(1).join(marker)) as Map<String, dynamic>;
+          final meta =
+              jsonDecode(parts.sublist(1).join(marker)) as Map<String, dynamic>;
           type = meta['type'] as String? ?? 'Appointment';
           status = meta['status'] as String? ?? 'pending';
           priority = meta['priority'] as String? ?? 'medium';
@@ -1178,21 +2078,35 @@ class _ElderlyScheduleSection extends StatelessWidget {
 
     Color typeColor;
     switch (type) {
-      case 'Medication': typeColor = _kBlue; break;
-      case 'Personal':   typeColor = _kGreen; break;
-      default:           typeColor = const Color(0xFF7B1FA2);
+      case 'Medication':
+        typeColor = _kBlue;
+        break;
+      case 'Personal':
+        typeColor = _kGreen;
+        break;
+      default:
+        typeColor = const Color(0xFF7B1FA2);
     }
 
     Color statusColor;
     IconData statusIcon;
     switch (status) {
-      case 'done': statusColor = _kGreen; statusIcon = Icons.check_circle; break;
-      case 'skip': statusColor = Colors.grey; statusIcon = Icons.skip_next; break;
-      case 'missed': statusColor = Colors.red; statusIcon = Icons.cancel; break;
-      default: statusColor = Colors.orange; statusIcon = Icons.pending;
+      case 'done':
+        statusColor = _kGreen;
+        statusIcon = Icons.check_circle;
+        break;
+      case 'skip':
+        statusColor = Colors.grey;
+        statusIcon = Icons.skip_next;
+        break;
+      case 'missed':
+        statusColor = Colors.red;
+        statusIcon = Icons.cancel;
+        break;
+      default:
+        statusColor = Colors.orange;
+        statusIcon = Icons.pending;
     }
-
-    final pColor = priority == 'high' ? const Color(0xFFD32F2F) : priority == 'low' ? _kGreen : const Color(0xFFF57C00);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -1201,49 +2115,121 @@ class _ElderlyScheduleSection extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: Colors.grey.shade200),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 4)],
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 4),
+        ],
       ),
-      child: Row(children: [
-        // Time column
-        SizedBox(
-          width: 52,
-          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Text(DateFormat('h:mm').format(dt), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _kDark)),
-            Text(DateFormat('a').format(dt), style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-          ]),
-        ),
-        Container(width: 1, height: 50, color: Colors.grey.shade200, margin: const EdgeInsets.symmetric(horizontal: 10)),
-        // Content
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-              decoration: BoxDecoration(color: typeColor.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(6)),
-              child: Text(type, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: typeColor)),
+      child: Row(
+        children: [
+          // Time column
+          SizedBox(
+            width: 52,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  DateFormat('h:mm').format(dt),
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: _kDark,
+                  ),
+                ),
+                Text(
+                  DateFormat('a').format(dt),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                ),
+              ],
             ),
-            const SizedBox(width: 6),
-            Container(
-              width: 8, height: 8,
-              decoration: BoxDecoration(color: pColor, shape: BoxShape.circle),
+          ),
+          Container(
+            width: 1,
+            height: 50,
+            color: Colors.grey.shade200,
+            margin: const EdgeInsets.symmetric(horizontal: 10),
+          ),
+          // Content
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: typeColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        type,
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: typeColor,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                    color: _kDark,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (location != null && location.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.location_on_outlined,
+                        size: 12,
+                        color: Colors.grey.shade400,
+                      ),
+                      const SizedBox(width: 3),
+                      Expanded(
+                        child: Text(
+                          location,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade500,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
             ),
-          ]),
-          const SizedBox(height: 5),
-          Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: _kDark), maxLines: 1, overflow: TextOverflow.ellipsis),
-          if (location != null && location.isNotEmpty) ...[
-            const SizedBox(height: 3),
-            Row(children: [
-              Icon(Icons.location_on_outlined, size: 12, color: Colors.grey.shade400),
-              const SizedBox(width: 3),
-              Expanded(child: Text(location, style: TextStyle(fontSize: 12, color: Colors.grey.shade500), maxLines: 1, overflow: TextOverflow.ellipsis)),
-            ]),
-          ],
-        ])),
-        // Status
-        Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(statusIcon, color: statusColor, size: 22),
-          Text(status.toUpperCase(), style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: statusColor)),
-        ]),
-      ]),
+          ),
+          // Status
+          Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(statusIcon, color: statusColor, size: 22),
+              Text(
+                status.toUpperCase(),
+                style: TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                  color: statusColor,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1251,38 +2237,101 @@ class _ElderlyScheduleSection extends StatelessWidget {
 // ═════════════════════════════════════════════════════════════════════════════
 // Tab 4 – Settings
 // ═════════════════════════════════════════════════════════════════════════════
-class _SettingsPage extends StatelessWidget {
+class _SettingsPage extends StatefulWidget {
   final String caregiverName;
   const _SettingsPage({required this.caregiverName});
+
+  @override
+  State<_SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<_SettingsPage> {
+  bool _notificationsEnabled = true;
+
+  void _snack(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg.tr()),
+        backgroundColor: isError ? Colors.red : Colors.green,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      body: CustomScrollView(slivers: [
-        _sliverHeader('Settings', Icons.settings, caregiverName, _kBlue),
-        SliverPadding(
-          padding: const EdgeInsets.all(20),
-          sliver: SliverList(delegate: SliverChildListDelegate([
-            _settingTile(Icons.person_outline, 'Profile', 'Manage your caregiver profile', () {}),
-            _settingTile(Icons.notifications_outlined, 'Notifications', 'Configure alert preferences', () {}),
-            _settingTile(Icons.privacy_tip_outlined, 'Privacy', 'Data usage and permissions', () {}),
-            const SizedBox(height: 20),
-            _logoutButton(context),
-          ])),
-        ),
-      ]),
+      body: CustomScrollView(
+        slivers: [
+          _sliverHeader(
+            'Settings',
+            Icons.settings,
+            widget.caregiverName,
+            _kBlue,
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.all(20),
+            sliver: SliverList(
+              delegate: SliverChildListDelegate([
+                _settingTile(
+                  Icons.person_outline,
+                  'Profile',
+                  'Manage your caregiver profile',
+                  () => _openAccountInfo(),
+                ),
+                _settingTile(
+                  Icons.notifications_outlined,
+                  'Notifications',
+                  'Configure alert preferences',
+                  () => _openNotifications(),
+                ),
+                _settingTile(
+                  Icons.privacy_tip_outlined,
+                  'Privacy',
+                  'Data usage and permissions',
+                  () => _openPrivacy(),
+                ),
+                const SizedBox(height: 20),
+                _logoutButton(context),
+              ]),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _settingTile(IconData icon, String title, String sub, VoidCallback onTap) {
+  Widget _settingTile(
+    IconData icon,
+    String title,
+    String sub,
+    VoidCallback onTap,
+  ) {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), border: Border.all(color: Colors.grey.shade200)),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
       child: ListTile(
-        leading: Container(padding: const EdgeInsets.all(9), decoration: BoxDecoration(color: _kBlue.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(10)), child: Icon(icon, color: _kBlue, size: 20)),
-        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-        subtitle: Text(sub, style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+        leading: Container(
+          padding: const EdgeInsets.all(9),
+          decoration: BoxDecoration(
+            color: _kBlue.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: _kBlue, size: 20),
+        ),
+        title: Text(
+          title,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+        ),
+        subtitle: Text(
+          sub,
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+        ),
         trailing: Icon(Icons.chevron_right, color: Colors.grey.shade400),
         onTap: onTap,
       ),
@@ -1297,22 +2346,345 @@ class _SettingsPage extends StatelessWidget {
         onPressed: () async {
           await Supabase.instance.client.auth.signOut();
           if (context.mounted) {
-            Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const LoginScreen()), (r) => false);
+            Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(builder: (_) => const LoginScreen()),
+              (r) => false,
+            );
           }
         },
         icon: const Icon(Icons.logout, color: Colors.red, size: 20),
-        label: const Text('Sign Out', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+        label: Text(
+          'Sign Out'.tr(),
+          style: TextStyle(
+            color: Colors.red,
+            fontWeight: FontWeight.bold,
+            fontSize: 16,
+          ),
+        ),
         style: OutlinedButton.styleFrom(
           side: const BorderSide(color: Colors.red, width: 1.5),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
         ),
+      ),
+    );
+  }
+
+  // ─── Settings Methods ────────────────────────────────────────────────────────
+
+  void _openAccountInfo() async {
+    final uid = Supabase.instance.client.auth.currentUser?.id;
+    if (uid == null) return;
+
+    final res = await Supabase.instance.client
+        .from('users')
+        .select('fullname, phone_num, address')
+        .eq('user_id', uid)
+        .maybeSingle();
+
+    if (!mounted) return;
+
+    final nameCtrl = TextEditingController(text: res?['fullname'] ?? '');
+    final phoneCtrl = TextEditingController(text: res?['phone_num'] ?? '');
+    final addressCtrl = TextEditingController(text: res?['address'] ?? '');
+
+    showModalBottomSheet(
+      context: context,
+      useRootNavigator: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setBS) {
+          return _buildBottomSheet(
+            title: 'Account Info'.tr(),
+            icon: Icons.person_outline_rounded,
+            child: Column(
+              children: [
+                _inputField('Full Name', nameCtrl, Icons.person_outline),
+                const SizedBox(height: 12),
+                _inputField('Phone Number', phoneCtrl, Icons.phone_outlined),
+                const SizedBox(height: 12),
+                LocationSearchField(
+                  controller: addressCtrl,
+                  label: 'Address',
+                  hint: 'Enter your address',
+                  prefixIcon: Icons.home_outlined,
+                  themeColor: _kBlue,
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _kBlue,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    onPressed: () async {
+                      try {
+                        await Supabase.instance.client
+                            .from('users')
+                            .update({
+                              'fullname': nameCtrl.text.trim(),
+                              'phone_num': phoneCtrl.text.trim(),
+                              'address': addressCtrl.text.trim(),
+                            })
+                            .eq('user_id', uid);
+                        if (mounted) {
+                          Navigator.pop(ctx);
+                          _snack('Profile updated successfully!');
+                        }
+                      } catch (e) {
+                        _snack('Error: $e', isError: true);
+                      }
+                    },
+                    child: Text(
+                      'Save Changes'.tr(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _openNotifications() {
+    showModalBottomSheet(
+      context: context,
+      useRootNavigator: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setBS) {
+          return _buildBottomSheet(
+            title: 'Notifications'.tr(),
+            icon: Icons.notifications_none_rounded,
+            child: Column(
+              children: [
+                _settingSwitch(
+                  Icons.notifications_active_outlined,
+                  'Push Notifications',
+                  'Receive alerts on your device',
+                  _notificationsEnabled,
+                  (v) {
+                    setBS(() => _notificationsEnabled = v);
+                    setState(() => _notificationsEnabled = v);
+                  },
+                ),
+                const SizedBox(height: 12),
+                _settingSwitch(
+                  Icons.health_and_safety_outlined,
+                  'SOS Alerts',
+                  'Emergency alerts from patients',
+                  true,
+                  (_) {},
+                ),
+                const SizedBox(height: 12),
+                _settingSwitch(
+                  Icons.medication_outlined,
+                  'Missed Medication',
+                  'Alert when patient misses medicine',
+                  true,
+                  (_) {},
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _openPrivacy() {
+    showModalBottomSheet(
+      context: context,
+      useRootNavigator: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _buildBottomSheet(
+        title: 'Privacy'.tr(),
+        icon: Icons.privacy_tip_outlined,
+        child: Column(
+          children: [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.description_outlined, color: _kBlue),
+              title: const Text(
+                'Terms of Service',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              trailing: const Icon(
+                Icons.open_in_new,
+                size: 16,
+                color: Colors.grey,
+              ),
+              onTap: () {},
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.policy_outlined, color: _kBlue),
+              title: const Text(
+                'Privacy Policy',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              trailing: const Icon(
+                Icons.open_in_new,
+                size: 16,
+                color: Colors.grey,
+              ),
+              onTap: () {},
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Your data is securely stored and only accessible by you and authorized caregivers.',
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomSheet({
+    required String title,
+    required IconData icon,
+    required Widget child,
+  }) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 12,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade300,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Icon(icon, color: _kBlue, size: 28),
+              const SizedBox(width: 12),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: _kDark,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _inputField(
+    String label,
+    TextEditingController ctrl,
+    IconData icon, {
+    int lines = 1,
+    Widget? suffixIcon,
+  }) {
+    return TextField(
+      controller: ctrl,
+      maxLines: lines,
+      decoration: InputDecoration(
+        labelText: label.tr(),
+        prefixIcon: Icon(icon, color: Colors.grey),
+        suffixIcon: suffixIcon,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        filled: true,
+        fillColor: Colors.grey.shade50,
+      ),
+    );
+  }
+
+  Widget _settingSwitch(
+    IconData icon,
+    String title,
+    String sub,
+    bool val,
+    Function(bool) onChanged,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: _kBlue.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: _kBlue, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title.tr(),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+                Text(
+                  sub.tr(),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                ),
+              ],
+            ),
+          ),
+          Switch(value: val, activeThumbColor: _kBlue, onChanged: onChanged),
+        ],
       ),
     );
   }
 }
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
-SliverAppBar _sliverHeader(String title, IconData icon, String subtitle, Color color) {
+SliverAppBar _sliverHeader(
+  String title,
+  IconData icon,
+  String subtitle,
+  Color color,
+) {
   return SliverAppBar(
     pinned: true,
     backgroundColor: color,
@@ -1330,14 +2702,34 @@ SliverAppBar _sliverHeader(String title, IconData icon, String subtitle, Color c
         child: SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-            child: Row(children: [
-              Icon(icon, color: Colors.white, size: 28),
-              const SizedBox(width: 12),
-              Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
-                Text(title, style: const TextStyle(fontFamily: 'League Spartan', fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white)),
-                Text(subtitle, style: TextStyle(color: Colors.white.withValues(alpha: 0.75), fontSize: 13)),
-              ]),
-            ]),
+            child: Row(
+              children: [
+                Icon(icon, color: Colors.white, size: 28),
+                const SizedBox(width: 12),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontFamily: 'League Spartan',
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.75),
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1354,11 +2746,22 @@ class _NoPatientHint extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(40),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.people_outline, size: 60, color: Colors.grey.shade300),
-        const SizedBox(height: 16),
-        Text(msg, textAlign: TextAlign.center, style: TextStyle(fontSize: 15, color: Colors.grey.shade400, height: 1.5)),
-      ]),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.people_outline, size: 60, color: Colors.grey.shade300),
+          const SizedBox(height: 16),
+          Text(
+            msg,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 15,
+              color: Colors.grey.shade400,
+              height: 1.5,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

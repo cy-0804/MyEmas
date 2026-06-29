@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'sign_up_screen.dart';
 import 'role_selection_screen.dart';
 import 'elderly_dashboard.dart';
 import 'caregiver_dashboard.dart';
 import 'biometric_prompt_screen.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -21,7 +23,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _biometricAvailable = false;
   bool _biometricEnabled = false;
 
-  final TextEditingController _emailPhoneController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   final LocalAuthentication _localAuth = LocalAuthentication();
 
@@ -40,9 +42,7 @@ class _LoginScreenState extends State<LoginScreen> {
       try {
         canCheck = await _localAuth.canCheckBiometrics;
         isAvailable = await _localAuth.isDeviceSupported();
-      } catch (_) {
-        // Device does not support biometrics
-      }
+      } catch (_) {}
 
       if (mounted) {
         setState(() {
@@ -51,19 +51,16 @@ class _LoginScreenState extends State<LoginScreen> {
         });
       }
 
-      // Auto-trigger biometric login if enabled and available
       if (biometricEnabled && (canCheck || isAvailable)) {
         await _loginWithBiometric();
       }
-    } catch (_) {
-      // Biometrics not available on this device
-    }
+    } catch (_) {}
   }
 
   Future<void> _loginWithBiometric() async {
     try {
       final authenticated = await _localAuth.authenticate(
-        localizedReason: 'Authenticate to log in to MyEmas',
+        localizedReason: 'authenticate_reason'.tr(),
         options: const AuthenticationOptions(
           biometricOnly: false,
           stickyAuth: true,
@@ -74,32 +71,28 @@ class _LoginScreenState extends State<LoginScreen> {
         await _navigateAfterLogin();
       }
     } catch (e) {
-      // Biometric failed – silently fall back to password login
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Biometric failed: use password instead')),
+          SnackBar(content: Text('biometric_failed'.tr())),
         );
       }
     }
   }
 
   Future<void> _login() async {
-    final contact = _emailPhoneController.text.trim();
+    final contact = _emailController.text.trim();
     final password = _passwordController.text;
 
     if (contact.isEmpty || password.isEmpty) {
-      _showSnack('Please fill in all fields');
+      _showSnack('please_fill_all_fields'.tr());
       return;
     }
 
     setState(() => _isLoading = true);
 
     try {
-      final isEmail = contact.contains('@');
-
       final response = await Supabase.instance.client.auth.signInWithPassword(
-        email: isEmail ? contact : null,
-        phone: isEmail ? null : '+60$contact',
+        email: contact,
         password: password,
       );
 
@@ -113,11 +106,51 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _googleSignIn() async {
+    setState(() => _isLoading = true);
+    try {
+      // TODO: Replace 'YOUR_WEB_CLIENT_ID' with the Web client ID from Google Cloud Console.
+      // Also ensure it is registered in Supabase Dashboard -> Authentication -> Providers -> Google.
+      const webClientId = '479645879162-6jsgchhq4v9skl9cul9hsj1t6veg3kpv.apps.googleusercontent.com';
+      
+      final googleSignIn = GoogleSignIn(
+        serverClientId: webClientId,
+      );
+      
+      final googleUser = await googleSignIn.signIn();
+      if (googleUser == null) {
+        setState(() => _isLoading = false);
+        return; // User canceled sign-in
+      }
+      
+      final googleAuth = await googleUser.authentication;
+      final accessToken = googleAuth.accessToken;
+      final idToken = googleAuth.idToken;
+
+      if (idToken == null || accessToken == null) {
+        throw 'Missing Google Auth Token';
+      }
+
+      final response = await Supabase.instance.client.auth.signInWithIdToken(
+        provider: OAuthProvider.google,
+        idToken: idToken,
+        accessToken: accessToken,
+      );
+
+      if (response.user != null && mounted) {
+        await _navigateAfterLogin();
+      }
+    } catch (e) {
+      if (mounted) _showSnack('Google Sign-In failed: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   Future<void> _navigateAfterLogin() async {
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null || !mounted) return;
 
-    // Fetch the user's row from public.users
     final userData = await Supabase.instance.client
         .from('users')
         .select('role_id')
@@ -125,7 +158,6 @@ class _LoginScreenState extends State<LoginScreen> {
         .maybeSingle();
 
     if (userData == null) {
-      // First time — create the row
       try {
         await Supabase.instance.client.from('users').insert({
           'user_id': user.id,
@@ -140,13 +172,12 @@ class _LoginScreenState extends State<LoginScreen> {
 
     final roleId = userData?['role_id'] as String?;
 
-    // First login — check biometric preference
     final prefs = await SharedPreferences.getInstance();
     final hasSetBiometric = prefs.containsKey('biometric_enabled');
+    
+    if (!mounted) return;
 
     if (!hasSetBiometric && _biometricAvailable) {
-      // Ask about biometrics first — BiometricPromptScreen will handle
-      // onward navigation after the user decides
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const BiometricPromptScreen()),
@@ -154,15 +185,12 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    // Route based on whether the user has already set a role
     if (roleId == null || roleId.isEmpty) {
-      // No role yet — send to role selection / onboarding
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
       );
     } else {
-      // Role already set — go straight to the correct dashboard
       _navigateToDashboard(roleId);
     }
   }
@@ -185,14 +213,13 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
   void dispose() {
-    _emailPhoneController.dispose();
+    _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -209,7 +236,6 @@ class _LoginScreenState extends State<LoginScreen> {
             children: [
               const SizedBox(height: 32),
 
-              // Title
               ShaderMask(
                 blendMode: BlendMode.srcIn,
                 shaderCallback: (bounds) => const LinearGradient(
@@ -217,9 +243,9 @@ class _LoginScreenState extends State<LoginScreen> {
                   begin: Alignment.centerLeft,
                   end: Alignment.centerRight,
                 ).createShader(Rect.fromLTWH(0, 0, bounds.width, bounds.height)),
-                child: const Text(
-                  'Log In',
-                  style: TextStyle(
+                child: Text(
+                  'log_in'.tr(),
+                  style: const TextStyle(
                     fontSize: 42,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 1.0,
@@ -227,19 +253,18 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              const Text(
-                'Enter your email/phone number and\npassword to log in',
+              Text(
+                'login_subtitle'.tr(),
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Color(0xFF6B7280), fontSize: 14, height: 1.5),
+                style: const TextStyle(color: Color(0xFF6B7280), fontSize: 14, height: 1.5),
               ),
               const SizedBox(height: 48),
 
-              // Email/Phone Number Label
-              const Align(
+              Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Email/Phone Number',
-                  style: TextStyle(
+                  'email_phone_label'.tr(),
+                  style: const TextStyle(
                     color: Color(0xFF374151),
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
@@ -248,10 +273,10 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 8),
               TextField(
-                controller: _emailPhoneController,
+                controller: _emailController,
                 keyboardType: TextInputType.emailAddress,
                 decoration: InputDecoration(
-                  hintText: 'Enter your email or phone number',
+                  hintText: 'email_phone_hint'.tr(),
                   hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
                   enabledBorder: OutlineInputBorder(
@@ -268,12 +293,11 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 20),
 
-              // Password Label
-              const Align(
+              Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Password',
-                  style: TextStyle(
+                  'Password'.tr(),
+                  style: const TextStyle(
                     color: Color(0xFF374151),
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
@@ -285,7 +309,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 controller: _passwordController,
                 obscureText: _obscurePassword,
                 decoration: InputDecoration(
-                  hintText: 'Password',
+                  hintText: 'password_hint'.tr(),
                   hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
                   prefixIcon: const Icon(Icons.lock_outline, color: Color(0xFF9CA3AF), size: 20),
                   suffixIcon: IconButton(
@@ -313,7 +337,6 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 28),
 
-              // Next / Login Button
               SizedBox(
                 width: double.infinity,
                 height: 54,
@@ -333,39 +356,38 @@ class _LoginScreenState extends State<LoginScreen> {
                           width: 22,
                           child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
                         )
-                      : const Row(
+                      : Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
-                              'Next',
-                              style: TextStyle(
+                              'Next'.tr(),
+                              style: const TextStyle(
                                 fontSize: 17,
                                 color: Colors.white,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
-                            SizedBox(width: 8),
-                            Icon(Icons.arrow_forward, color: Colors.white, size: 18),
+                            const SizedBox(width: 8),
+                            const Icon(Icons.arrow_forward, color: Colors.white, size: 18),
                           ],
                         ),
                 ),
               ),
 
-              // Biometric login button (shown if available and enabled)
               if (_biometricAvailable && _biometricEnabled) ...[
                 const SizedBox(height: 16),
                 GestureDetector(
                   onTap: _loginWithBiometric,
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: const Row(
+                    child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.fingerprint, color: Color(0xFF55A47A), size: 28),
-                        SizedBox(width: 8),
+                        const Icon(Icons.fingerprint, color: Color(0xFF55A47A), size: 28),
+                        const SizedBox(width: 8),
                         Text(
-                          'Login with Biometrics',
-                          style: TextStyle(
+                          'login_with_biometrics'.tr(),
+                          style: const TextStyle(
                             color: Color(0xFF55A47A),
                             fontWeight: FontWeight.w600,
                             fontSize: 15,
@@ -379,14 +401,13 @@ class _LoginScreenState extends State<LoginScreen> {
 
               const SizedBox(height: 24),
 
-              // Or Text
               Row(
                 children: [
                   Expanded(child: Divider(color: Colors.grey.shade300)),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: Text(
-                      'Or',
+                      'Or'.tr(),
                       style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
                     ),
                   ),
@@ -395,12 +416,11 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 24),
 
-              // Continue with Google
               SizedBox(
                 width: double.infinity,
                 height: 54,
                 child: OutlinedButton(
-                  onPressed: () {},
+                  onPressed: _isLoading ? null : _googleSignIn,
                   style: OutlinedButton.styleFrom(
                     side: BorderSide(color: Colors.grey.shade300),
                     shape: RoundedRectangleBorder(
@@ -419,9 +439,9 @@ class _LoginScreenState extends State<LoginScreen> {
                             const Icon(Icons.g_mobiledata, size: 24, color: Colors.blue),
                       ),
                       const SizedBox(width: 10),
-                      const Text(
-                        'Continue with Google',
-                        style: TextStyle(
+                      Text(
+                        'continue_with_google'.tr(),
+                        style: const TextStyle(
                           color: Color(0xFF374151),
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
@@ -433,12 +453,11 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 40),
 
-              // Sign Up link
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
-                    "Don't have an account? ",
+                    'no_account'.tr(),
                     style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
                   ),
                   GestureDetector(
@@ -446,9 +465,9 @@ class _LoginScreenState extends State<LoginScreen> {
                       context,
                       MaterialPageRoute(builder: (_) => const SignUpScreen()),
                     ),
-                    child: const Text(
-                      'Sign Up',
-                      style: TextStyle(
+                    child: Text(
+                      'Sign Up'.tr(),
+                      style: const TextStyle(
                         color: Color(0xFF55A47A),
                         fontWeight: FontWeight.bold,
                         fontSize: 14,

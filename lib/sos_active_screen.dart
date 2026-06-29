@@ -1,5 +1,5 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'sos_service.dart';
 
 class SosActiveScreen extends StatefulWidget {
@@ -47,7 +47,10 @@ class _SosActiveScreenState extends State<SosActiveScreen>
       final error = await _sos.triggerSos();
       if (error != null && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error), backgroundColor: Colors.orange.shade800),
+          SnackBar(
+            content: Text(error),
+            backgroundColor: Colors.orange.shade800,
+          ),
         );
         await Future.delayed(const Duration(seconds: 2));
         if (mounted) Navigator.of(context).pop();
@@ -81,14 +84,18 @@ class _SosActiveScreenState extends State<SosActiveScreen>
               children: [
                 // ── Header ──
                 const SizedBox(height: 16),
-                const Row(
+                Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.warning_amber_rounded, color: Colors.white, size: 28),
-                    SizedBox(width: 10),
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Colors.white,
+                      size: 28,
+                    ),
+                    const SizedBox(width: 10),
                     Text(
-                      'SOS EMERGENCY',
-                      style: TextStyle(
+                      'SOS EMERGENCY'.tr(),
+                      style: const TextStyle(
                         color: Colors.white,
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
@@ -98,9 +105,9 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                   ],
                 ),
                 const SizedBox(height: 8),
-                const Text(
-                  'Help is being called',
-                  style: TextStyle(color: Colors.white70, fontSize: 16),
+                Text(
+                  'Help is being called'.tr(),
+                  style: const TextStyle(color: Colors.white70, fontSize: 16),
                 ),
                 const SizedBox(height: 48),
 
@@ -109,17 +116,16 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                   child: Center(
                     child: AnimatedBuilder(
                       animation: _rippleController,
-                      builder: (_, __) {
+                      builder: (_, _) {
                         return Stack(
                           alignment: Alignment.center,
                           children: [
                             // Ripple rings
-                            for (int i = 0; i < 3; i++)
-                              _buildRipple(i),
+                            for (int i = 0; i < 3; i++) _buildRipple(i),
                             // Center SOS circle
                             AnimatedBuilder(
                               animation: _pulseController,
-                              builder: (_, __) => Transform.scale(
+                              builder: (_, _) => Transform.scale(
                                 scale: 1.0 + _pulseController.value * 0.08,
                                 child: Container(
                                   width: 140,
@@ -129,16 +135,18 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                                     color: Colors.white,
                                     boxShadow: [
                                       BoxShadow(
-                                        color: Colors.white.withValues(alpha: 0.5),
+                                        color: Colors.white.withValues(
+                                          alpha: 0.5,
+                                        ),
                                         blurRadius: 30,
                                         spreadRadius: 10,
                                       ),
                                     ],
                                   ),
-                                  child: const Center(
+                                  child: Center(
                                     child: Text(
-                                      'SOS',
-                                      style: TextStyle(
+                                      'SOS'.tr(),
+                                      style: const TextStyle(
                                         fontSize: 40,
                                         fontWeight: FontWeight.w900,
                                         color: Color(0xFFB71C1C),
@@ -167,10 +175,14 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                   ),
                   child: Column(
                     children: [
-                      const Icon(Icons.phone_in_talk_rounded, color: Colors.white, size: 32),
+                      const Icon(
+                        Icons.phone_in_talk_rounded,
+                        color: Colors.white,
+                        size: 32,
+                      ),
                       const SizedBox(height: 8),
                       Text(
-                        'Calling $_callingName...',
+                        '${'Calling'.tr()} $_callingName...',
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 20,
@@ -180,12 +192,19 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                       const SizedBox(height: 16),
                       Row(
                         children: [
-                          const Icon(Icons.location_on_outlined, color: Colors.white70, size: 16),
+                          const Icon(
+                            Icons.location_on_outlined,
+                            color: Colors.white70,
+                            size: 16,
+                          ),
                           const SizedBox(width: 6),
                           Expanded(
                             child: Text(
                               _location,
-                              style: const TextStyle(color: Colors.white70, fontSize: 13),
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 13,
+                              ),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -197,9 +216,13 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'If the call is not answered, the next caregiver will be called automatically.',
+                  'If the call is not answered, the next caregiver will be called automatically.'
+                      .tr(),
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.6), fontSize: 13),
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.6),
+                    fontSize: 13,
+                  ),
                 ),
                 const SizedBox(height: 24),
 
@@ -211,12 +234,21 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                     onPressed: _cancelling ? null : _cancelSos,
                     icon: _cancelling
                         ? const SizedBox(
-                            width: 18, height: 18,
-                            child: CircularProgressIndicator(color: Color(0xFFB71C1C), strokeWidth: 2),
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              color: Color(0xFFB71C1C),
+                              strokeWidth: 2,
+                            ),
                           )
-                        : const Icon(Icons.cancel_outlined, color: Color(0xFFB71C1C)),
+                        : const Icon(
+                            Icons.cancel_outlined,
+                            color: Color(0xFFB71C1C),
+                          ),
                     label: Text(
-                      _cancelling ? 'Cancelling...' : 'Cancel SOS — I am Safe',
+                      _cancelling
+                          ? 'Cancelling...'.tr()
+                          : 'Cancel SOS — I am Safe'.tr(),
                       style: const TextStyle(
                         color: Color(0xFFB71C1C),
                         fontSize: 16,
@@ -225,7 +257,9 @@ class _SosActiveScreenState extends State<SosActiveScreen>
                     ),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
                       elevation: 0,
                     ),
                   ),

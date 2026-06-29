@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'basic_info_screen.dart';
 import 'caregiver_basic_info_screen.dart';
 import 'login_screen.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class RoleSelectionScreen extends StatefulWidget {
   const RoleSelectionScreen({super.key});
@@ -134,7 +135,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                     color: Colors.black87,
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: const Text('Coming Soon', style: TextStyle(color: Colors.white, fontSize: 12)),
+                  child: Text('Coming Soon'.tr(), style: TextStyle(color: Colors.white, fontSize: 12)),
                 ),
               ),
           ],
@@ -165,14 +166,14 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
       ),
       body: SafeArea(
         child: _isLoading
-            ? const Center(child: CircularProgressIndicator(color: Color(0xFF51A77B)))
+            ? Center(child: CircularProgressIndicator(color: Color(0xFF51A77B)))
             : SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
                 child: Column(
                   children: [
                     const SizedBox(height: 8),
-                    const Text(
-                      'Select Your Role',
+                    Text(
+                      'Select Your Role'.tr(),
                       style: TextStyle(
                         fontSize: 32,
                         fontWeight: FontWeight.w900,
@@ -182,7 +183,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                     ),
                     const SizedBox(height: 60),
                     _buildRoleCard(
-                      title: 'Elderly',
+                      title: 'Elderly'.tr(),
                       description: 'Simple interface, voice commands, and health tracking tools.',
                       titleColor: const Color(0xFF3F8863),
                       image1: 'senior.png',
@@ -191,7 +192,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                     ),
                     const SizedBox(height: 30),
                     _buildRoleCard(
-                      title: 'Caregiver',
+                      title: 'Caregiver'.tr(),
                       description: 'Remote monitoring, alert management, and caregiver support.',
                       titleColor: const Color(0xFF00539E),
                       image1: 'caregiver.png',

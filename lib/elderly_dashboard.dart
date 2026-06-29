@@ -1,45 +1,148 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:intl/intl.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'medication_missed_checker.dart';
 import 'health_dashboard_view.dart';
 import 'medication_dashboard_view.dart';
 import 'schedule_dashboard_view.dart';
 import 'add_edit_schedule_screen.dart';
-import 'login_screen.dart';
 import 'voice_search_helper.dart';
-import 'sos_service.dart';
+import 'dart:async';
 import 'sos_active_screen.dart';
 import 'elderly_settings_screen.dart';
+import 'sos_notification_service.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 const _kPrimary = Color(0xFF51A77B);
-const _kBlue    = Color(0xFF00539E);
-const _kBg      = Color(0xFFF6F8FA);
-const _kTextDark = Color(0xFF27252E);
+const _kBlue = Color(0xFF00539E);
+const _kBg = Color(0xFFF6F8FA);
 
 class ElderlyDashboard extends StatefulWidget {
   const ElderlyDashboard({super.key});
-  @override State<ElderlyDashboard> createState() => _ElderlyDashboardState();
+  @override
+  State<ElderlyDashboard> createState() => _ElderlyDashboardState();
 }
 
 class _ElderlyDashboardState extends State<ElderlyDashboard> {
   int _selectedIndex = 0;
   String _userName = 'User';
-  List<Map<String, dynamic>> _upcomingSchedules = [];
-  bool _loadingSchedules = true;
   HealthRecord? _latestRecord;
 
   // SOS State
-  final SosService _sosService = SosService();
   bool _sosHolding = false;
   double _sosProgress = 0.0;
   static const int _sosDurationMs = 3000;
-  DateTime? _holdStartTime;
+  Timer? _periodicTimer;
+  DateTime? _lastPromptTime;
 
   @override
   void initState() {
     super.initState();
     _loadUserData();
+    _requestCriticalPermissions();
+    _periodicTimer = Timer.periodic(const Duration(minutes: 1), (_) async {
+      final uid = Supabase.instance.client.auth.currentUser?.id;
+      if (uid != null) {
+        await MedicationMissedChecker.checkAndMarkMissed(uid);
+      }
+      await _checkHealthReminder();
+    });
+  }
+
+  @override
+  void dispose() {
+    _periodicTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _requestCriticalPermissions() async {
+    // Request all critical permissions for SOS upfront so the app doesn't crash or block during an emergency.
+    await [Permission.phone, Permission.sms, Permission.location].request();
+  }
+
+  Future<void> _checkHealthReminder() async {
+    try {
+      final db = Supabase.instance.client;
+      final uid = db.auth.currentUser?.id;
+      if (uid == null) return;
+
+      final elRes = await db
+          .from('elderly')
+          .select('health_record_time')
+          .eq('user_id', uid)
+          .maybeSingle();
+      if (elRes == null || elRes['health_record_time'] == null) return;
+
+      final timeStr = elRes['health_record_time'] as String;
+      final parts = timeStr.split(':');
+      final hour = int.tryParse(parts[0]) ?? 0;
+      final minute = int.tryParse(parts[1]) ?? 0;
+
+      final now = DateTime.now();
+      final recordTime = DateTime(now.year, now.month, now.day, hour, minute);
+
+      if (now.isAfter(recordTime)) {
+        // Check if there is a record for today
+        final startOfDay = DateTime(
+          now.year,
+          now.month,
+          now.day,
+        ).toUtc().toIso8601String();
+        final hrRes = await db
+            .from('health_record')
+            .select('record_id')
+            .eq('elderly_id', uid)
+            .gte('recorded_at', startOfDay)
+            .limit(1)
+            .maybeSingle();
+
+        if (hrRes == null) {
+          // No record today!
+          // 1. Prompt elderly every 15 mins
+          if (_lastPromptTime == null ||
+              now.difference(_lastPromptTime!).inMinutes >= 15) {
+            _lastPromptTime = now;
+            SosNotificationService().showMedicationNotification(
+              elderlyName: _userName,
+              title: 'Health Data Reminder',
+              summaryText: 'Daily Health Log',
+              message: 'Please remember to log your health data for today!',
+            );
+          }
+
+          // 2. Alert caregiver if skipped (e.g. > 1 hour past recordTime)
+          if (now.difference(recordTime).inMinutes > 60) {
+            // Check if we already sent alert today
+            final alertRes = await db
+                .from('emergency_logs')
+                .select('alert_id')
+                .eq('status', 'health_missed')
+                .gte('timestamp', startOfDay)
+                .limit(1)
+                .maybeSingle();
+            if (alertRes == null) {
+              // Get caregiver link
+              final linkRes = await db
+                  .from('care_link')
+                  .select('link_id')
+                  .eq('elderly_id', uid)
+                  .limit(1)
+                  .maybeSingle();
+              if (linkRes != null) {
+                await db.from('emergency_logs').insert({
+                  'link_id': linkRes['link_id'],
+                  'status': 'health_missed',
+                  'location': '{"address":"Health Data Missed"}',
+                  'timestamp': DateTime.now().toUtc().toIso8601String(),
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Health reminder check error: $e');
+    }
   }
 
   Future<void> _loadUserData() async {
@@ -73,25 +176,33 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
             final full = userData['fullname'] as String;
             _userName = full.split(' ').first;
           }
-          _latestRecord = healthRes != null ? HealthRecord.fromMap(healthRes) : null;
-          _loadingSchedules = false;
+          _latestRecord = healthRes != null
+              ? HealthRecord.fromMap(healthRes)
+              : null;
         });
       }
     } catch (e) {
       debugPrint('Dashboard load error: $e');
-      if (mounted) setState(() => _loadingSchedules = false);
     }
   }
 
   void _openAddHealthRecord() async {
     final uid = Supabase.instance.client.auth.currentUser?.id;
     if (uid == null) return;
-    await Navigator.push(context, MaterialPageRoute(builder: (_) => AddEditHealthRecordScreen(elderlyId: uid)));
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AddEditHealthRecordScreen(elderlyId: uid),
+      ),
+    );
     _loadUserData();
   }
 
   void _openAddMedicine() async {
-    await Navigator.push(context, MaterialPageRoute(builder: (_) => const AddEditMedicineScreen()));
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const AddEditMedicineScreen()),
+    );
   }
 
   void _openAddSchedule() async {
@@ -113,25 +224,36 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
           children: [
             VoiceSearchBar(
               onCommand: (cmd) {
-                if (cmd.contains('medicine') || cmd.contains('medicat') || cmd.contains('pill')) {
+                if (cmd.contains('medicine') ||
+                    cmd.contains('medicat') ||
+                    cmd.contains('pill')) {
                   if (cmd.contains('add')) {
                     _openAddMedicine();
                   } else {
                     setState(() => _selectedIndex = 2);
                   }
-                } else if (cmd.contains('health') || cmd.contains('record') || cmd.contains('blood')) {
+                } else if (cmd.contains('health') ||
+                    cmd.contains('record') ||
+                    cmd.contains('blood')) {
                   if (cmd.contains('add')) {
                     _openAddHealthRecord();
                   } else {
                     setState(() => _selectedIndex = 1);
                   }
-                } else if (cmd.contains('schedule') || cmd.contains('calendar') || cmd.contains('appointment') || cmd.contains('event')) {
-                  if (cmd.contains('add') || cmd.contains('new') || cmd.contains('create')) {
+                } else if (cmd.contains('schedule') ||
+                    cmd.contains('calendar') ||
+                    cmd.contains('appointment') ||
+                    cmd.contains('event')) {
+                  if (cmd.contains('add') ||
+                      cmd.contains('new') ||
+                      cmd.contains('create')) {
                     _openAddSchedule();
                   } else {
                     setState(() => _selectedIndex = 3);
                   }
-                } else if (cmd.contains('home') || cmd.contains('dashboard') || cmd.contains('main')) {
+                } else if (cmd.contains('home') ||
+                    cmd.contains('dashboard') ||
+                    cmd.contains('main')) {
                   setState(() => _selectedIndex = 0);
                 }
               },
@@ -150,11 +272,7 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
                     ],
                   ),
                   // SOS Floating Button
-                  Positioned(
-                    right: 16,
-                    bottom: 80,
-                    child: _buildSosButton(),
-                  ),
+                  Positioned(right: 16, bottom: 80, child: _buildSosButton()),
                   // Bottom Nav
                   Align(
                     alignment: Alignment.bottomCenter,
@@ -172,7 +290,11 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
   // ─── Home Tab ────────────────────────────────────────────────────────────────
   Widget _buildHomeTab() {
     final now = DateTime.now();
-    final greeting = now.hour < 12 ? 'Good Morning' : now.hour < 17 ? 'Good Afternoon' : 'Good Evening';
+    final greeting = now.hour < 12
+        ? 'Good Morning'
+        : now.hour < 17
+        ? 'Good Afternoon'
+        : 'Good Evening';
 
     return SingleChildScrollView(
       padding: const EdgeInsets.only(bottom: 160),
@@ -185,16 +307,47 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(greeting, style: TextStyle(fontSize: 16, color: Colors.grey.shade600)),
-                  const SizedBox(height: 2),
-                  RichText(text: TextSpan(children: [
-                    const TextSpan(text: 'Hello, ', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Color(0xFF27252E), fontFamily: 'League Spartan')),
-                    TextSpan(text: _userName, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: _kBlue, fontFamily: 'League Spartan')),
-                    const TextSpan(text: ' 👋', style: TextStyle(fontSize: 22)),
-                  ])),
-                ]),
-                _buildNotificationIcon(),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      greeting,
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    RichText(
+                      text: TextSpan(
+                        children: [
+                          const TextSpan(
+                            text: 'Hello, ',
+                            style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF27252E),
+                              fontFamily: 'League Spartan',
+                            ),
+                          ),
+                          TextSpan(
+                            text: _userName,
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                              color: _kBlue,
+                              fontFamily: 'League Spartan',
+                            ),
+                          ),
+                          const TextSpan(
+                            text: ' 👋',
+                            style: TextStyle(fontSize: 22),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -214,22 +367,38 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
                   end: Alignment.bottomRight,
                 ),
                 borderRadius: BorderRadius.circular(20),
-                boxShadow: [BoxShadow(color: _kPrimary.withOpacity(0.3), blurRadius: 16, offset: const Offset(0, 6))],
+                boxShadow: [
+                  BoxShadow(
+                    color: _kPrimary.withValues(alpha: 0.3),
+                    blurRadius: 16,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(DateFormat('EEEE').format(now), style: const TextStyle(color: Colors.white70, fontSize: 16)),
-                    const SizedBox(height: 4),
-                    Text(DateFormat('d MMMM yyyy').format(now), style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 12),
-                    Text(DateFormat('hh:mm a').format(now), style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold)),
-                  ]),
-                  Container(
-                    width: 60, height: 60,
-                    decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), shape: BoxShape.circle),
-                    child: const Icon(Icons.calendar_today, color: Colors.white, size: 30),
+                  Text(
+                    DateFormat('EEEE').format(now),
+                    style: const TextStyle(color: Colors.white70, fontSize: 16),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    DateFormat('d MMMM yyyy').format(now),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    DateFormat('hh:mm a').format(now),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ],
               ),
@@ -238,35 +407,41 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
 
           const SizedBox(height: 24),
 
-          // ── Health Summary ──
-          _buildSectionHeader('Health Summary', onTap: () => setState(() => _selectedIndex = 1)),
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: _latestRecord == null
-                ? _buildHealthSummaryEmpty()
-                : _buildHealthSummaryCards(),
-          ),
-
-          const SizedBox(height: 24),
-
           // ── Quick Actions ──
-          _buildSectionHeader('Quick Actions'),
+          _buildSectionHeader('Quick Actions'.tr()),
           const SizedBox(height: 12),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: GridView.count(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              crossAxisCount: 2,
-              crossAxisSpacing: 14,
-              mainAxisSpacing: 14,
-              childAspectRatio: 1.4,
+            child: Column(
               children: [
-                _buildQuickAction('Health Record', Icons.monitor_heart, const Color(0xFFE8F5E9), _kPrimary, _openAddHealthRecord),
-                _buildQuickAction('Log Medicine', Icons.medication_liquid, const Color(0xFFE3F2FD), _kBlue, _openAddMedicine),
-                _buildQuickAction('Schedule', Icons.calendar_month, const Color(0xFFFFF3E0), Colors.orange, _openAddSchedule),
-                _buildQuickAction('Settings', Icons.settings_rounded, const Color(0xFFF3E5F5), Colors.purple, () => setState(() => _selectedIndex = 4)),
+                _buildQuickAction(
+                  'Health Data'.tr(),
+                  Icons.favorite_rounded,
+                  const Color(0xFFFFEBEE),
+                  const Color(0xFFF44336),
+                  _openAddHealthRecord,
+                ),
+                _buildQuickAction(
+                  'Log Medicine'.tr(),
+                  Icons.medication_liquid,
+                  const Color(0xFFE3F2FD),
+                  _kBlue,
+                  _openAddMedicine,
+                ),
+                _buildQuickAction(
+                  'Schedules'.tr(),
+                  Icons.calendar_today_rounded,
+                  const Color(0xFFE8F5E9),
+                  const Color(0xFF4CAF50),
+                  _openAddSchedule,
+                ),
+                _buildQuickAction(
+                  'Settings'.tr(),
+                  Icons.settings_rounded,
+                  const Color(0xFFF3E5F5), // Light purple background
+                  const Color(0xFF9C27B0), // Purple icon
+                  () => setState(() => _selectedIndex = 4),
+                ),
               ],
             ),
           ),
@@ -277,71 +452,44 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
     );
   }
 
-  Widget _buildHealthSummaryEmpty() {
-    return GestureDetector(
-      onTap: () => setState(() => _selectedIndex = 1),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 24),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade200)),
-        child: Column(children: [
-          Icon(Icons.monitor_heart_outlined, size: 56, color: Colors.grey.shade300),
-          const SizedBox(height: 16),
-          Text('No health records yet', style: TextStyle(fontSize: 18, color: Colors.grey.shade500, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 8),
-          Text('Tap to record your health data', style: TextStyle(color: Colors.grey.shade400, fontSize: 16)),
-        ]),
-      ),
-    );
-  }
-
-  Widget _buildHealthSummaryCards() {
-    final r = _latestRecord!;
-    return Column(children: [
-      Row(children: [
-        Expanded(child: _miniHealthCard('Heart Rate', r.heartRate?.toString() ?? '–', 'bpm', Icons.favorite, Colors.red.shade300, Colors.red.shade50)),
-        const SizedBox(width: 14),
-        Expanded(child: _miniHealthCard('Blood Pressure', r.bloodPressure ?? '–', 'mmHg', Icons.show_chart, Colors.blue.shade400, Colors.blue.shade50)),
-      ]),
-      const SizedBox(height: 14),
-      Row(children: [
-        Expanded(child: _miniHealthCard('Glucose', r.glucoseLevel?.toStringAsFixed(1) ?? '–', 'mmol/L', Icons.bloodtype, Colors.green.shade400, Colors.green.shade50)),
-        const SizedBox(width: 14),
-        Expanded(child: _miniHealthCard('Temperature', r.temperature?.toStringAsFixed(1) ?? '–', '°C', Icons.thermostat, Colors.orange.shade400, Colors.orange.shade50)),
-      ]),
-    ]);
-  }
-
-  Widget _miniHealthCard(String title, String value, String unit, IconData icon, Color iconColor, Color iconBg) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), border: Border.all(color: Colors.grey.shade200)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Expanded(child: Text(title, style: const TextStyle(fontSize: 16, color: Color(0xFF6C7278), fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
-          Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: iconBg, shape: BoxShape.circle), child: Icon(icon, size: 18, color: iconColor)),
-        ]),
-        const SizedBox(height: 12),
-        FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft,
-          child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            Text(value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF27252E))),
-            const SizedBox(width: 4),
-            Padding(padding: const EdgeInsets.only(bottom: 2), child: Text(unit, style: TextStyle(fontSize: 16, color: Colors.grey.shade500))),
-          ])),
-      ]),
-    );
-  }
-
-  Widget _buildQuickAction(String title, IconData icon, Color bg, Color color, VoidCallback onTap) {
+  Widget _buildQuickAction(
+    String title,
+    IconData icon,
+    Color bg,
+    Color color,
+    VoidCallback onTap,
+  ) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(16)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Icon(icon, size: 36, color: color),
-          Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color)),
-        ]),
+        margin: const EdgeInsets.only(bottom: 14),
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 42, color: color),
+            const SizedBox(width: 24),
+            Expanded(
+              child: Text(
+                title,
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 22,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: color.withValues(alpha: 0.5),
+              size: 30,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -349,19 +497,33 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
   Widget _buildSectionHeader(String title, {VoidCallback? onTap}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Text(title, style: const TextStyle(fontFamily: 'League Spartan', fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF27252E))),
-        if (onTap != null)
-          GestureDetector(onTap: onTap, child: const Text('View All', style: TextStyle(fontSize: 16, color: _kPrimary, fontWeight: FontWeight.w600))),
-      ]),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontFamily: 'League Spartan',
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF27252E),
+            ),
+          ),
+          if (onTap != null)
+            GestureDetector(
+              onTap: onTap,
+              child: Text(
+                'View All'.tr(),
+                style: const TextStyle(
+                  color: _kPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        ],
+      ),
     );
-  }
-
-  Widget _buildNotificationIcon() {
-    return Stack(children: [
-      const Icon(Icons.notifications_none, size: 30, color: Color(0xFF27252E)),
-      Positioned(right: 3, top: 3, child: Container(width: 9, height: 9, decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle))),
-    ]);
   }
 
   // Settings tab is now handled by ElderlySettingsScreen
@@ -370,18 +532,26 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
   Widget _buildSosButton() {
     return GestureDetector(
       onLongPressStart: (_) {
-        _holdStartTime = DateTime.now();
-        setState(() { _sosHolding = true; _sosProgress = 0.0; });
+        setState(() {
+          _sosHolding = true;
+          _sosProgress = 0.0;
+        });
         _runSosCountdown();
       },
       onLongPressEnd: (_) {
         if (_sosProgress < 1.0) {
           // Released too early — cancel
-          setState(() { _sosHolding = false; _sosProgress = 0.0; });
+          setState(() {
+            _sosHolding = false;
+            _sosProgress = 0.0;
+          });
         }
       },
       onLongPressCancel: () {
-        setState(() { _sosHolding = false; _sosProgress = 0.0; });
+        setState(() {
+          _sosHolding = false;
+          _sosProgress = 0.0;
+        });
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
@@ -424,11 +594,22 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
                   end: Alignment.bottomCenter,
                 ),
               ),
-              child: const Column(
+              child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text('SOS', style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold, height: 1.0)),
-                  Text('Hold', style: TextStyle(color: Colors.white70, fontSize: 9)),
+                  Text(
+                    'SOS'.tr(),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      height: 1.0,
+                    ),
+                  ),
+                  Text(
+                    'Hold'.tr(),
+                    style: const TextStyle(color: Colors.white70, fontSize: 9),
+                  ),
                 ],
               ),
             ),
@@ -450,7 +631,10 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
 
     // 3 seconds complete — trigger SOS
     if (!mounted) return;
-    setState(() { _sosHolding = false; _sosProgress = 0.0; });
+    setState(() {
+      _sosHolding = false;
+      _sosProgress = 0.0;
+    });
     _triggerSos();
   }
 
@@ -469,16 +653,22 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
       decoration: BoxDecoration(
         color: Colors.white,
         border: Border(top: BorderSide(color: Colors.grey.shade200)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, -2))],
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, -2),
+          ),
+        ],
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
-          _navItem(0, Icons.home_rounded, 'HOME'),
-          _navItem(1, Icons.monitor_heart_rounded, 'HEALTH'),
-          _navItem(2, Icons.medication_liquid, 'MEDICINE'),
-          _navItem(3, Icons.calendar_today, 'SCHEDULE'),
-          _navItem(4, Icons.settings_rounded, 'SETTINGS'),
+          _navItem(0, Icons.home_rounded, 'Dashboard'.tr()),
+          _navItem(1, Icons.monitor_heart_rounded, 'Health Data'.tr()),
+          _navItem(2, Icons.medication_liquid, 'Medications'.tr()),
+          _navItem(3, Icons.calendar_today, 'Schedules'.tr()),
+          _navItem(4, Icons.settings_rounded, 'Settings'.tr()),
         ],
       ),
     );
@@ -493,16 +683,31 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
         if (index == 0) _loadUserData(); // Refresh Home tab when coming back
       },
       behavior: HitTestBehavior.opaque,
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: sel ? const EdgeInsets.symmetric(horizontal: 12, vertical: 4) : EdgeInsets.zero,
-          decoration: BoxDecoration(color: sel ? _kBlue.withOpacity(0.1) : Colors.transparent, borderRadius: BorderRadius.circular(20)),
-          child: Icon(icon, color: color, size: 22),
-        ),
-        const SizedBox(height: 2),
-        Text(label, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold)),
-      ]),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: sel
+                ? const EdgeInsets.symmetric(horizontal: 12, vertical: 4)
+                : EdgeInsets.zero,
+            decoration: BoxDecoration(
+              color: sel ? _kBlue.withValues(alpha: 0.1) : Colors.transparent,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Icon(icon, color: color, size: 22),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 9,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

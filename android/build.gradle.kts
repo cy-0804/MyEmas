@@ -30,6 +30,14 @@ subprojects {
             } catch (e: Exception) {
                 // ignore if method doesn't exist
             }
+
+            // Force all plugins to compile against SDK 36
+            try {
+                val setCompileSdk = androidExt.javaClass.getMethod("setCompileSdkVersion", Int::class.java)
+                setCompileSdk.invoke(androidExt, 36)
+            } catch (e: Exception) {
+                // ignore if not applicable
+            }
         }
     }
 }

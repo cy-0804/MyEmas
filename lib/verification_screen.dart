@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'account_created_screen.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 class VerificationScreen extends StatefulWidget {
   final bool isEmail;
@@ -180,8 +181,8 @@ class _VerificationScreenState extends State<VerificationScreen> {
           icon: const Icon(Icons.arrow_back, color: Color(0xFF101113)),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text(
-          'Verification',
+        title: Text(
+          'Verification'.tr(),
           style: TextStyle(
             color: Color(0xFF101113),
             fontSize: 18,
@@ -258,7 +259,7 @@ class _VerificationScreenState extends State<VerificationScreen> {
                             fontWeight: FontWeight.bold,
                             color: Color(0xFF101113),
                           ),
-                          decoration: const InputDecoration(
+                          decoration: InputDecoration(
                             counterText: '',
                             border: InputBorder.none,
                           ),
@@ -317,8 +318,8 @@ class _VerificationScreenState extends State<VerificationScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: const Text(
-                      'Verify',
+                    child: Text(
+                      'Verify'.tr(),
                       style: TextStyle(
                         fontSize: 16,
                         color: Color(0xFF55A47A),

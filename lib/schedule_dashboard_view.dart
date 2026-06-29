@@ -1,14 +1,16 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:intl/intl.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'add_edit_schedule_screen.dart';
 import 'medication_dashboard_view.dart';
+import 'session_manager.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // ─── STYLE CONSTANTS ──────────────────────────────────────────────────────────
 const _kPrimary = Color(0xFF51A77B);
-const _kBlue    = Color(0xFF00539E);
-const _kBg      = Color(0xFFF6F8FA);
+const _kBlue = Color(0xFF00539E);
+const _kBg = Color(0xFFF6F8FA);
 const _kTextDark = Color(0xFF101113);
 const _kTextGrey = Color(0xFF6C7278);
 
@@ -58,7 +60,9 @@ class ScheduleRecord {
       id: m['schedule_id'] as String,
       elderlyId: m['elderly_id'] as String? ?? '',
       title: m['title'] as String? ?? 'Untitled Schedule',
-      scheduleDateTime: DateTime.parse(m['schedule_date_time'] as String).toLocal(),
+      scheduleDateTime: (m['schedule_date_time'] as String).endsWith('Z')
+          ? DateTime.parse(m['schedule_date_time'] as String).toLocal()
+          : DateTime.parse('${m['schedule_date_time']}Z').toLocal(),
       location: m['location'] as String?,
       notes: rawNotes,
       scheduleType: meta.scheduleType,
@@ -119,8 +123,16 @@ class ScheduleMetadata {
           status: map['status'] as String? ?? 'pending',
           photoUrl: map['photo_url'] as String?,
           allDay: map['all_day'] as bool? ?? false,
-          endDateTime: map['end_date_time'] != null ? DateTime.parse(map['end_date_time']) : null,
-          reminderTime: map['reminder_time'] != null ? DateTime.parse(map['reminder_time']) : null,
+          endDateTime: map['end_date_time'] != null
+              ? (map['end_date_time'].endsWith('Z')
+                    ? DateTime.parse(map['end_date_time']).toLocal()
+                    : DateTime.parse('${map['end_date_time']}Z').toLocal())
+              : null,
+          reminderTime: map['reminder_time'] != null
+              ? (map['reminder_time'].endsWith('Z')
+                    ? DateTime.parse(map['reminder_time']).toLocal()
+                    : DateTime.parse('${map['reminder_time']}Z').toLocal())
+              : null,
           repeatFrequency: map['repeat'] as String?,
           notesText: parts[0],
         );
@@ -151,10 +163,12 @@ class ScheduleMetadata {
       'priority': priority,
       'status': status,
       'all_day': allDay,
-      if (endDateTime != null) 'end_date_time': endDateTime.toIso8601String(),
-      if (reminderTime != null) 'reminder_time': reminderTime.toIso8601String(),
-      if (repeat != null) 'repeat': repeat,
-      if (photoUrl != null) 'photo_url': photoUrl,
+      if (endDateTime != null)
+        'end_date_time': endDateTime.toUtc().toIso8601String(),
+      if (reminderTime != null)
+        'reminder_time': reminderTime.toUtc().toIso8601String(),
+      'repeat': ?repeat,
+      'photo_url': ?photoUrl,
     };
     return '$notesText\n\n__METADATA__:${jsonEncode(map)}';
   }
@@ -198,54 +212,76 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
           .eq('elderly_id', uid)
           .order('schedule_date_time', ascending: true);
 
-      final schedules = (res as List).map((m) => ScheduleRecord.fromMap(m)).toList();
+      final schedules = (res as List)
+          .map((m) => ScheduleRecord.fromMap(m))
+          .where((m) => m.scheduleType.toLowerCase() != 'medication')
+          .toList();
       bool needsRefresh = false;
-      
+
       final now = DateTime.now();
       for (final record in schedules) {
-        if (record.repeatFrequency != null && record.repeatFrequency != 'None') {
+        if (record.repeatFrequency != null &&
+            record.repeatFrequency != 'None') {
           // Check if the day has passed
-          if (!_isSameDay(record.scheduleDateTime, now) && record.scheduleDateTime.isBefore(now)) {
-             DateTime nextDateTime = record.scheduleDateTime;
-             while (nextDateTime.isBefore(now) && !_isSameDay(nextDateTime, now)) {
-               if (record.repeatFrequency == 'Daily') {
-                 nextDateTime = nextDateTime.add(const Duration(days: 1));
-               } else if (record.repeatFrequency == 'Weekly') {
-                 nextDateTime = nextDateTime.add(const Duration(days: 7));
-               } else if (record.repeatFrequency == 'Monthly') {
-                 nextDateTime = DateTime(nextDateTime.year, nextDateTime.month + 1, nextDateTime.day, nextDateTime.hour, nextDateTime.minute);
-               } else {
-                 break;
-               }
-             }
-             
-             final newNotes = ScheduleMetadata.toNotesString(
-               notesText: record.cleanNotes,
-               type: record.scheduleType,
-               priority: record.priority,
-               status: 'pending',
-               allDay: record.allDay,
-               endDateTime: record.endDateTime,
-               reminderTime: record.reminderTime,
-               repeat: record.repeatFrequency,
-               photoUrl: record.photoUrl,
-             );
-             
-             await _db.from('schedule').update({
-               'schedule_date_time': nextDateTime.toUtc().toIso8601String(),
-               'notes': newNotes,
-             }).eq('schedule_id', record.id);
-             
-             needsRefresh = true;
+          if (!_isSameDay(record.scheduleDateTime, now) &&
+              record.scheduleDateTime.isBefore(now)) {
+            DateTime nextDateTime = record.scheduleDateTime;
+            while (nextDateTime.isBefore(now) &&
+                !_isSameDay(nextDateTime, now)) {
+              if (record.repeatFrequency == 'Daily') {
+                nextDateTime = nextDateTime.add(const Duration(days: 1));
+              } else if (record.repeatFrequency == 'Weekly') {
+                nextDateTime = nextDateTime.add(const Duration(days: 7));
+              } else if (record.repeatFrequency == 'Monthly') {
+                nextDateTime = DateTime(
+                  nextDateTime.year,
+                  nextDateTime.month + 1,
+                  nextDateTime.day,
+                  nextDateTime.hour,
+                  nextDateTime.minute,
+                );
+              } else {
+                break;
+              }
+            }
+
+            final newNotes = ScheduleMetadata.toNotesString(
+              notesText: record.cleanNotes,
+              type: record.scheduleType,
+              priority: record.priority,
+              status: 'pending',
+              allDay: record.allDay,
+              endDateTime: record.endDateTime,
+              reminderTime: record.reminderTime,
+              repeat: record.repeatFrequency,
+              photoUrl: record.photoUrl,
+            );
+
+            await _db
+                .from('schedule')
+                .update({
+                  'schedule_date_time': nextDateTime.toUtc().toIso8601String(),
+                  'notes': newNotes,
+                })
+                .eq('schedule_id', record.id);
+
+            needsRefresh = true;
           }
         }
       }
 
       if (needsRefresh) {
-        final res2 = await _db.from('schedule').select().eq('elderly_id', uid).order('schedule_date_time', ascending: true);
+        final res2 = await _db
+            .from('schedule')
+            .select()
+            .eq('elderly_id', uid)
+            .order('schedule_date_time', ascending: true);
         if (mounted) {
           setState(() {
-            _allSchedules = (res2 as List).map((m) => ScheduleRecord.fromMap(m)).toList();
+            _allSchedules = (res2 as List)
+                .map((m) => ScheduleRecord.fromMap(m))
+                .where((m) => m.scheduleType.toLowerCase() != 'medication')
+                .toList();
             _loading = false;
           });
         }
@@ -262,7 +298,12 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
       debugPrint('Schedule load error: $e');
       if (mounted) {
         setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Load Schedule Error: $e'), backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Load Schedule Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     }
   }
@@ -281,16 +322,17 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
         photoUrl: record.photoUrl,
       );
 
-      await _db.from('schedule').update({
-        'notes': newNotes,
-      }).eq('schedule_id', record.id);
+      await _db
+          .from('schedule')
+          .update({'notes': newNotes})
+          .eq('schedule_id', record.id);
 
       _fetchSchedules();
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Schedule updated successfully'),
+            content: Text('Schedule updated successfully'.tr()),
             backgroundColor: _kPrimary,
           ),
         );
@@ -306,7 +348,10 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
       _fetchSchedules();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Schedule deleted successfully'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text('Schedule deleted successfully'.tr()),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     } catch (e) {
@@ -334,73 +379,98 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
     return _allSchedules.where((item) {
       // 1. Search Query Filter
       if (_searchQuery.isNotEmpty) {
-        final titleMatch = item.title.toLowerCase().contains(_searchQuery.toLowerCase());
-        final locMatch = item.location != null &&
+        final titleMatch = item.title.toLowerCase().contains(
+          _searchQuery.toLowerCase(),
+        );
+        final locMatch =
+            item.location != null &&
             item.location!.toLowerCase().contains(_searchQuery.toLowerCase());
         if (!titleMatch && !locMatch) return false;
       }
 
-      // 2. Date/Calendar Filter based on viewMode
-      bool isMatch = false;
-      
-      if (_viewMode == 'Day View') {
-        isMatch = _isSameDay(item.scheduleDateTime, _selectedDate);
-      } else if (_viewMode == 'Week View') {
-        isMatch = _isSameWeek(item.scheduleDateTime, _selectedDate);
-      } else {
-        isMatch = _isSameMonth(item.scheduleDateTime, _selectedDate);
-      }
-      
+      // 2. Date/Calendar Filter (Always filter by exact selected day regardless of view mode)
+      bool isMatch = _isSameDay(item.scheduleDateTime, _selectedDate);
+
       // If it doesn't match directly, check if it's a repeating event that falls into the selected period
-      if (!isMatch && item.repeatFrequency != null && item.repeatFrequency != 'None') {
-        final start = DateTime(item.scheduleDateTime.year, item.scheduleDateTime.month, item.scheduleDateTime.day);
-        final target = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
-        
+      if (!isMatch &&
+          item.repeatFrequency != null &&
+          item.repeatFrequency != 'None') {
+        final start = DateTime(
+          item.scheduleDateTime.year,
+          item.scheduleDateTime.month,
+          item.scheduleDateTime.day,
+        );
+        final target = DateTime(
+          _selectedDate.year,
+          _selectedDate.month,
+          _selectedDate.day,
+        );
+
         // Only show repeating events on or after their start date
         if (!target.isBefore(start)) {
-           if (_viewMode == 'Day View') {
-             if (item.repeatFrequency == 'Daily') isMatch = true;
-             else if (item.repeatFrequency == 'Weekly' && start.weekday == target.weekday) isMatch = true;
-             else if (item.repeatFrequency == 'Monthly' && start.day == target.day) isMatch = true;
-           } else if (_viewMode == 'Week View') {
-             // For week view, Daily and Weekly always appear in subsequent weeks
-             if (item.repeatFrequency == 'Daily' || item.repeatFrequency == 'Weekly') isMatch = true;
-             else if (item.repeatFrequency == 'Monthly') {
-                // Check if the target week contains the monthly day
-                final selectedMonday = _selectedDate.subtract(Duration(days: _selectedDate.weekday - 1));
-                final startOfWeek = DateTime(selectedMonday.year, selectedMonday.month, selectedMonday.day);
-                final endOfWeek = startOfWeek.add(const Duration(days: 6));
-                
-                // Construct the repeating day in the target month
-                final repeatDayThisMonth = DateTime(target.year, target.month, start.day);
-                if (!repeatDayThisMonth.isBefore(startOfWeek) && !repeatDayThisMonth.isAfter(endOfWeek)) {
-                  isMatch = true;
-                } else {
-                  // Might be in the overlapping month
-                  final repeatDayNextMonth = DateTime(target.year, target.month + 1, start.day);
-                  if (!repeatDayNextMonth.isBefore(startOfWeek) && !repeatDayNextMonth.isAfter(endOfWeek)) {
-                    isMatch = true;
-                  }
-                }
-             }
-           } else {
-             // Month View
-             if (item.repeatFrequency == 'Daily' || item.repeatFrequency == 'Weekly' || item.repeatFrequency == 'Monthly') {
-               isMatch = true;
-             }
-           }
+          if (item.repeatFrequency == 'Daily') {
+            isMatch = true;
+          } else if (item.repeatFrequency == 'Weekly' &&
+              start.weekday == target.weekday) {
+            isMatch = true;
+          } else if (item.repeatFrequency == 'Monthly' &&
+              start.day == target.day) {
+            isMatch = true;
+          }
         }
       }
-      
+
       return isMatch;
     }).toList();
   }
 
   ScheduleRecord? get _nextEvent {
     final now = DateTime.now();
-    final upcoming = _allSchedules.where((item) {
-      return item.scheduleDateTime.isAfter(now) && item.status == 'pending';
-    }).toList();
+    final todayStart = DateTime(now.year, now.month, now.day);
+    
+    List<ScheduleRecord> upcoming = [];
+    
+    for (var item in _allSchedules) {
+      if (item.status != 'pending') continue;
+
+      bool isMatch = _isSameDay(item.scheduleDateTime, now);
+      DateTime eventTimeToday = DateTime(
+        now.year, 
+        now.month, 
+        now.day, 
+        item.scheduleDateTime.hour, 
+        item.scheduleDateTime.minute
+      );
+
+      if (!isMatch && item.repeatFrequency != null && item.repeatFrequency != 'None') {
+        final start = DateTime(
+          item.scheduleDateTime.year,
+          item.scheduleDateTime.month,
+          item.scheduleDateTime.day,
+        );
+        
+        if (!todayStart.isBefore(start)) {
+          if (item.repeatFrequency == 'Daily') {
+            isMatch = true;
+          } else if (item.repeatFrequency == 'Weekly' && start.weekday == todayStart.weekday) {
+            isMatch = true;
+          } else if (item.repeatFrequency == 'Monthly' && start.day == todayStart.day) {
+            isMatch = true;
+          }
+        }
+      }
+
+      if (isMatch && eventTimeToday.isAfter(now)) {
+        upcoming.add(item);
+      }
+    }
+    
+    upcoming.sort((a, b) {
+      DateTime timeA = DateTime(now.year, now.month, now.day, a.scheduleDateTime.hour, a.scheduleDateTime.minute);
+      DateTime timeB = DateTime(now.year, now.month, now.day, b.scheduleDateTime.hour, b.scheduleDateTime.minute);
+      return timeA.compareTo(timeB);
+    });
+
     return upcoming.isNotEmpty ? upcoming.first : null;
   }
 
@@ -410,8 +480,14 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
 
   bool _isSameWeek(DateTime date, DateTime selected) {
     // Find start of week (Monday)
-    final selectedMonday = selected.subtract(Duration(days: selected.weekday - 1));
-    final startOfWeek = DateTime(selectedMonday.year, selectedMonday.month, selectedMonday.day);
+    final selectedMonday = selected.subtract(
+      Duration(days: selected.weekday - 1),
+    );
+    final startOfWeek = DateTime(
+      selectedMonday.year,
+      selectedMonday.month,
+      selectedMonday.day,
+    );
     final endOfWeek = startOfWeek.add(const Duration(days: 7));
 
     return date.isAfter(startOfWeek.subtract(const Duration(seconds: 1))) &&
@@ -427,7 +503,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
     return Scaffold(
       backgroundColor: _kBg,
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kPrimary))
+          ? Center(child: CircularProgressIndicator(color: _kPrimary))
           : RefreshIndicator(
               onRefresh: _fetchSchedules,
               color: _kPrimary,
@@ -441,13 +517,13 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     _buildSearchBar(),
                     const SizedBox(height: 18),
 
-                    // Date range status text
-                    _buildTodayDateLabel(),
+                    // Header
+                    _buildHeader(),
                     const SizedBox(height: 14),
 
                     // Next Event Section
                     if (_viewMode == 'Day View') ...[
-                      _buildSectionHeader('Next Event'),
+                      _buildSectionHeader('Next Event'.tr()),
                       const SizedBox(height: 8),
                       if (_nextEvent != null)
                         _buildNextEventCard(_nextEvent!)
@@ -460,14 +536,21 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: Colors.grey.shade200),
                           ),
-                          child: const Row(
+                          child: Row(
                             children: [
-                              Icon(Icons.event_available, color: _kPrimary),
-                              SizedBox(width: 12),
+                              const Icon(
+                                Icons.event_available,
+                                color: _kPrimary,
+                              ),
+                              const SizedBox(width: 12),
                               Expanded(
                                 child: Text(
-                                  'You have no upcoming events for today.',
-                                  style: TextStyle(color: Colors.grey, fontSize: 15, fontWeight: FontWeight.w500),
+                                  'You have no upcoming events for today.'.tr(),
+                                  style: const TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w500,
+                                  ),
                                 ),
                               ),
                             ],
@@ -477,13 +560,9 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     ],
 
                     // View Switcher & Filters
-                    _buildSectionHeader('Schedule List'),
+                    _buildSectionHeader('Schedule List'.tr()),
                     const SizedBox(height: 8),
                     _buildFiltersAndSelectors(),
-                    const SizedBox(height: 14),
-
-                    // Search input by title/location
-                    _buildSearchInputFilter(),
                     const SizedBox(height: 14),
 
                     // Calendar UI if Week or Month View
@@ -495,10 +574,14 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                       const SizedBox(height: 14),
                     ],
 
+                    // Selected Date Label
+                    _buildSelectedDateLabel(),
+                    const SizedBox(height: 8),
+
                     // Help instructions
                     Center(
                       child: Text(
-                        'Tap card to view details',
+                        'Tap card to view details'.tr(),
                         style: TextStyle(
                           color: Colors.grey.shade500,
                           fontSize: 12,
@@ -519,14 +602,22 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                         style: ElevatedButton.styleFrom(
                           backgroundColor: _kPrimary,
                           foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 12,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
                           elevation: 2,
                         ),
                         icon: const Icon(Icons.add, size: 20),
-                        label: const Text(
-                          'Add Schedule',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        label: Text(
+                          'Add Schedule'.tr(),
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                     ),
@@ -551,13 +642,13 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
             color: Colors.black.withOpacity(0.04),
             blurRadius: 6,
             offset: const Offset(0, 2),
-          )
+          ),
         ],
       ),
       child: TextField(
         onChanged: (val) => setState(() => _searchQuery = val),
         decoration: InputDecoration(
-          hintText: 'Search title or location...',
+          hintText: 'Search title or location...'.tr(),
           hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 15),
           prefixIcon: Icon(Icons.search, color: Colors.grey.shade500, size: 20),
           border: InputBorder.none,
@@ -567,16 +658,46 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
     );
   }
 
-  Widget _buildTodayDateLabel() {
+  Widget _buildHeader() {
+    final now = DateTime.now();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Schedules'.tr(),
+                style: const TextStyle(
+                  fontFamily: 'League Spartan',
+                  fontSize: 28,
+                  fontWeight: FontWeight.w900,
+                  color: _kTextDark,
+                ),
+              ),
+              Text(
+                DateFormat('EEEE, d MMMM').format(now),
+                style: const TextStyle(fontSize: 16, color: _kTextGrey),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSelectedDateLabel() {
     final format = DateFormat('yyyy/M/d, EEEE');
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Today',
-            style: TextStyle(
+          Text(
+            'Selected Date'.tr(),
+            style: const TextStyle(
               fontSize: 16,
               color: _kTextGrey,
               fontWeight: FontWeight.w600,
@@ -626,7 +747,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
             color: Colors.black.withOpacity(0.05),
             blurRadius: 8,
             offset: const Offset(0, 4),
-          )
+          ),
         ],
       ),
       child: IntrinsicHeight(
@@ -634,157 +755,173 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
           behavior: HitTestBehavior.opaque,
           onTap: () {
             if (event.scheduleType.toLowerCase() == 'medication') {
-              Navigator.push(context, MaterialPageRoute(builder: (_) => MedicationDashboardView(elderlyId: event.elderlyId, isStandalone: true)));
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => MedicationDashboardView(
+                    elderlyId: event.elderlyId,
+                    isStandalone: true,
+                  ),
+                ),
+              );
             }
           },
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // Left Time Column
-            Container(
-              width: 80,
-              alignment: Alignment.center,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    timeStr,
-                    style: const TextStyle(
-                      fontFamily: 'Manrope',
-                      fontWeight: FontWeight.bold,
-                      fontSize: 26,
-                      color: _kTextDark,
-                      height: 1.1,
-                    ),
-                  ),
-                  Text(
-                    amPmStr,
-                    style: TextStyle(
-                      fontFamily: 'Manrope',
-                      fontWeight: FontWeight.w600,
-                      fontSize: 16,
-                      color: Colors.grey.shade600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            // Vertical Divider
-            VerticalDivider(color: Colors.grey.shade300, width: 16, thickness: 1),
-            // Details Right Side
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  // Category & Priority
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey.shade300),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          event.scheduleType.toUpperCase(),
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey.shade600,
-                            letterSpacing: 1.0,
-                          ),
-                        ),
+              Container(
+                width: 80,
+                alignment: Alignment.center,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      timeStr,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontWeight: FontWeight.bold,
+                        fontSize: 26,
+                        color: _kTextDark,
+                        height: 1.1,
                       ),
-                      const SizedBox(width: 6),
-                      _buildPriorityTag(event.priority),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  // Title
-                  Text(
-                    event.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 20,
-                      color: _kTextDark,
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  // Location
-                  if (event.location != null && event.location!.isNotEmpty)
-                    Row(
-                      children: [
-                        const Icon(Icons.map, size: 14, color: _kBlue),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Text(
-                            event.location!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                          ),
-                        ),
-                      ],
+                    Text(
+                      amPmStr,
+                      style: TextStyle(
+                        fontFamily: 'Manrope',
+                        fontWeight: FontWeight.w600,
+                        fontSize: 16,
+                        color: Colors.grey.shade600,
+                      ),
                     ),
-                  const SizedBox(height: 12),
-                  // Done / Skip Buttons
-                  if (event.scheduleType.toLowerCase() != 'medication')
-                    Row(
-                      children: [
-                        Expanded(
-                          child: InkWell(
-                            onTap: () => _updateStatus(event, 'done'),
-                            child: Container(
-                              height: 32,
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color: _kPrimary,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: const Text(
-                                'Done',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: InkWell(
-                            onTap: () => _updateStatus(event, 'skip'),
-                            child: Container(
-                              height: 32,
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                border: Border.all(color: Colors.red),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: const Text(
-                                'Skip',
-                                style: TextStyle(
-                                  color: Colors.red,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    )
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
-        ),
-      ), // close GestureDetector
+              // Vertical Divider
+              VerticalDivider(
+                color: Colors.grey.shade300,
+                width: 16,
+                thickness: 1,
+              ),
+              // Details Right Side
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Category & Priority
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey.shade300),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            event.scheduleType.toUpperCase(),
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey.shade600,
+                              letterSpacing: 1.0,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    // Title
+                    Text(
+                      event.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 20,
+                        color: _kTextDark,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    // Location
+                    if (event.location != null && event.location!.isNotEmpty)
+                      Row(
+                        children: [
+                          const Icon(Icons.map, size: 14, color: _kBlue),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              event.location!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    const SizedBox(height: 12),
+                    // Done / Skip Buttons
+                    if (event.scheduleType.toLowerCase() != 'medication')
+                      Row(
+                        children: [
+                          Expanded(
+                            child: InkWell(
+                              onTap: () => _updateStatus(event, 'done'),
+                              child: Container(
+                                height: 32,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  color: _kPrimary,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  'Done'.tr(),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: InkWell(
+                              onTap: () => _updateStatus(event, 'skip'),
+                              child: Container(
+                                height: 32,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: Colors.red),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  'Skip'.tr(),
+                                  style: const TextStyle(
+                                    color: Colors.red,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ), // close GestureDetector
       ), // close IntrinsicHeight
     ); // close Container
   }
@@ -805,13 +942,17 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                   color: Colors.black.withOpacity(0.05),
                   blurRadius: 4,
                   offset: const Offset(0, 2),
-                )
+                ),
               ],
             ),
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String>(
                 value: _dateFilter,
-                style: const TextStyle(color: _kTextGrey, fontSize: 13, fontWeight: FontWeight.w600),
+                style: const TextStyle(
+                  color: _kTextGrey,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
                 icon: const Icon(Icons.arrow_drop_down, color: _kTextGrey),
                 onChanged: (val) {
                   if (val == null) return;
@@ -820,14 +961,16 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     if (val == 'Today') {
                       _selectedDate = DateTime.now();
                     } else if (val == 'Tomorrow') {
-                      _selectedDate = DateTime.now().add(const Duration(days: 1));
+                      _selectedDate = DateTime.now().add(
+                        const Duration(days: 1),
+                      );
                     } else {
                       _pickCustomDate();
                     }
                   });
                 },
                 items: ['Today', 'Tomorrow', 'Select Date']
-                    .map((s) => DropdownMenuItem(value: s, child: Text(s)))
+                    .map((s) => DropdownMenuItem(value: s, child: Text(s.tr())))
                     .toList(),
               ),
             ),
@@ -847,13 +990,17 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                   color: Colors.black.withOpacity(0.05),
                   blurRadius: 4,
                   offset: const Offset(0, 2),
-                )
+                ),
               ],
             ),
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String>(
                 value: _viewMode,
-                style: const TextStyle(color: _kTextGrey, fontSize: 13, fontWeight: FontWeight.w600),
+                style: const TextStyle(
+                  color: _kTextGrey,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
                 icon: const Icon(Icons.arrow_drop_down, color: _kTextGrey),
                 onChanged: (val) {
                   if (val == null) return;
@@ -862,7 +1009,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                   });
                 },
                 items: ['Day View', 'Week View', 'Month View']
-                    .map((s) => DropdownMenuItem(value: s, child: Text(s)))
+                    .map((s) => DropdownMenuItem(value: s, child: Text(s.tr())))
                     .toList(),
               ),
             ),
@@ -872,40 +1019,15 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
     );
   }
 
-  Widget _buildSearchInputFilter() {
-    return Container(
-      height: 38,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          )
-        ],
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              _searchQuery.isEmpty ? 'Filter: Title / Location' : 'Searching: $_searchQuery',
-              style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          Icon(Icons.filter_list_alt, color: Colors.grey.shade400, size: 16),
-        ],
-      ),
-    );
-  }
-
   // ─── WEEK CALENDAR SELECTIONS ──────────────────────────────────────────────
   Widget _buildWeekCalendarSelector() {
-    final selectedMonday = _selectedDate.subtract(Duration(days: _selectedDate.weekday - 1));
-    final weekDays = List.generate(7, (index) => selectedMonday.add(Duration(days: index)));
+    final selectedMonday = _selectedDate.subtract(
+      Duration(days: _selectedDate.weekday - 1),
+    );
+    final weekDays = List.generate(
+      7,
+      (index) => selectedMonday.add(Duration(days: index)),
+    );
 
     return Container(
       height: 84,
@@ -975,9 +1097,18 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
   // ─── MONTH CALENDAR SELECTIONS ─────────────────────────────────────────────
   Widget _buildMonthCalendarSelector() {
     // Basic calendar view grid
-    final daysInMonth = DateTime(_selectedDate.year, _selectedDate.month + 1, 0).day;
-    final firstDayOfMonth = DateTime(_selectedDate.year, _selectedDate.month, 1);
-    final offset = firstDayOfMonth.weekday % 7; // Sun is 0 in some calendars, Mon is 1.
+    final daysInMonth = DateTime(
+      _selectedDate.year,
+      _selectedDate.month + 1,
+      0,
+    ).day;
+    final firstDayOfMonth = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      1,
+    );
+    final offset =
+        firstDayOfMonth.weekday % 7; // Sun is 0 in some calendars, Mon is 1.
 
     final gridItems = <Widget>[];
 
@@ -987,8 +1118,12 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
       gridItems.add(
         Center(
           child: Text(
-            h,
-            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _kTextGrey),
+            h.tr(),
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: _kTextGrey,
+            ),
           ),
         ),
       );
@@ -1022,7 +1157,9 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                   dayNum.toString(),
                   style: TextStyle(
                     fontSize: 13,
-                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                    fontWeight: isSelected
+                        ? FontWeight.bold
+                        : FontWeight.normal,
                     color: isSelected ? Colors.white : _kTextDark,
                   ),
                 ),
@@ -1037,7 +1174,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                         shape: BoxShape.circle,
                       ),
                     ),
-                  )
+                  ),
               ],
             ),
           ),
@@ -1062,7 +1199,11 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                 icon: const Icon(Icons.chevron_left, color: _kTextGrey),
                 onPressed: () {
                   setState(() {
-                    _selectedDate = DateTime(_selectedDate.year, _selectedDate.month - 1, 1);
+                    _selectedDate = DateTime(
+                      _selectedDate.year,
+                      _selectedDate.month - 1,
+                      1,
+                    );
                   });
                 },
               ),
@@ -1078,7 +1219,11 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                 icon: const Icon(Icons.chevron_right, color: _kTextGrey),
                 onPressed: () {
                   setState(() {
-                    _selectedDate = DateTime(_selectedDate.year, _selectedDate.month + 1, 1);
+                    _selectedDate = DateTime(
+                      _selectedDate.year,
+                      _selectedDate.month + 1,
+                      1,
+                    );
                   });
                 },
               ),
@@ -1092,10 +1237,16 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
               Container(
                 width: 6,
                 height: 6,
-                decoration: const BoxDecoration(color: Colors.black45, shape: BoxShape.circle),
+                decoration: const BoxDecoration(
+                  color: Colors.black45,
+                  shape: BoxShape.circle,
+                ),
               ),
               const SizedBox(width: 6),
-              const Text('Date has event', style: TextStyle(fontSize: 11, color: _kTextGrey)),
+              Text(
+                'Date has event'.tr(),
+                style: const TextStyle(fontSize: 11, color: _kTextGrey),
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -1115,7 +1266,28 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
   }
 
   bool _hasEventOnDate(DateTime date) {
-    return _allSchedules.any((s) => _isSameDay(s.scheduleDateTime, date));
+    final target = DateTime(date.year, date.month, date.day);
+    for (var item in _allSchedules) {
+      bool isMatch = _isSameDay(item.scheduleDateTime, target);
+      if (!isMatch && item.repeatFrequency != null && item.repeatFrequency != 'None') {
+        final start = DateTime(
+          item.scheduleDateTime.year,
+          item.scheduleDateTime.month,
+          item.scheduleDateTime.day,
+        );
+        if (!target.isBefore(start)) {
+          if (item.repeatFrequency == 'Daily') {
+            isMatch = true;
+          } else if (item.repeatFrequency == 'Weekly' && start.weekday == target.weekday) {
+            isMatch = true;
+          } else if (item.repeatFrequency == 'Monthly' && start.day == target.day) {
+            isMatch = true;
+          }
+        }
+      }
+      if (isMatch) return true;
+    }
+    return false;
   }
 
   void _pickCustomDate() async {
@@ -1159,10 +1331,14 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
         ),
         child: Column(
           children: [
-            Icon(Icons.calendar_today_outlined, size: 48, color: Colors.grey.shade300),
+            Icon(
+              Icons.calendar_today_outlined,
+              size: 48,
+              color: Colors.grey.shade300,
+            ),
             const SizedBox(height: 12),
             Text(
-              'No schedules found',
+              'No schedules found'.tr(),
               style: TextStyle(
                 fontSize: 15,
                 color: Colors.grey.shade400,
@@ -1174,13 +1350,84 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
       );
     }
 
-    return ListView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: items.length,
-      itemBuilder: (context, index) {
-        final item = items[index];
-        return _buildScheduleItemCard(item);
+    return Builder(
+      builder: (ctx) {
+        final manager = SessionManager();
+        final Map<String, List<ScheduleRecord>> grouped = {};
+        for (final item in items) {
+          final rTime =
+              item.scheduleDateTime.hour * 60 + item.scheduleDateTime.minute;
+          CustomSession? best = manager.sessions.isNotEmpty ? manager.sessions.last : null;
+          for (final s in manager.sessions) {
+            final sTime = s.time.hour * 60 + s.time.minute;
+            if (rTime >= sTime) {
+              best = s;
+            } else {
+              break;
+            }
+          }
+          final key = best?.name ?? 'Other';
+          grouped.putIfAbsent(key, () => []).add(item);
+        }
+
+        return Column(
+          children: [
+            ...manager.sessions.map((session) {
+              final list = grouped[session.name];
+              if (list == null || list.isEmpty) return const SizedBox.shrink();
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.access_time_filled,
+                          size: 18,
+                          color: _kBlue,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${session.name} Session'.tr(),
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: _kBlue,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ...list.map((item) => _buildScheduleItemCard(item)),
+                ],
+              );
+            }),
+
+            // Render any that didn't match a session just in case
+            if (grouped.containsKey('Other'))
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
+                    child: Text(
+                      'Other'.tr(),
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ),
+                  ...grouped['Other']!.map(
+                    (item) => _buildScheduleItemCard(item),
+                  ),
+                ],
+              ),
+          ],
+        );
       },
     );
   }
@@ -1192,135 +1439,176 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
     final amPmStr = amPmFormat.format(item.scheduleDateTime);
 
     return Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.grey.shade200),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.02),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            )
-          ],
-        ),
-        child: InkWell(
-          onTap: () {
-            if (item.scheduleType.toLowerCase() == 'medication') {
-              Navigator.push(context, MaterialPageRoute(builder: (_) => MedicationDashboardView(elderlyId: item.elderlyId, isStandalone: true)));
-            } else {
-              _showDetailsDialog(item);
-            }
-          },
-          borderRadius: BorderRadius.circular(10),
-          child: Column(
-            children: [
-              IntrinsicHeight(
-                child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Left Time
-                Container(
-                  width: 72,
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        timeStr,
-                        style: const TextStyle(
-                          fontFamily: 'Manrope',
-                          fontWeight: FontWeight.bold,
-                          fontSize: 22,
-                          color: _kTextDark,
-                          height: 1.1,
-                        ),
-                      ),
-                      Text(
-                        amPmStr,
-                        style: TextStyle(
-                          fontFamily: 'Manrope',
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                          color: Colors.grey.shade600,
-                        ),
-                      ),
-                    ],
-                  ),
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.grey.shade200),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.02),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: InkWell(
+        onTap: () {
+          if (item.scheduleType.toLowerCase() == 'medication') {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => MedicationDashboardView(
+                  elderlyId: item.elderlyId,
+                  isStandalone: true,
                 ),
-                // Divider
-                VerticalDivider(color: Colors.grey.shade200, width: 1, thickness: 1),
-                // Details Right Side
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
+              ),
+            );
+          } else {
+            _showDetailsDialog(item);
+          }
+        },
+        borderRadius: BorderRadius.circular(10),
+        child: Column(
+          children: [
+            IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Left Time
+                  Container(
+                    width: 72,
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        // Tags row
-                        Row(
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                border: Border.all(color: Colors.grey.shade300),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                item.scheduleType.toUpperCase(),
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.grey.shade600,
-                                  letterSpacing: 0.8,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 4),
-                            _buildPriorityTag(item.priority),
-                            const Spacer(),
-                            _buildStatusTag(item.status),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        // Title
                         Text(
-                          item.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                          timeStr,
                           style: const TextStyle(
+                            fontFamily: 'Manrope',
                             fontWeight: FontWeight.bold,
-                            fontSize: 16,
+                            fontSize: 22,
                             color: _kTextDark,
+                            height: 1.1,
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        // Location
-                        if (item.location != null && item.location!.isNotEmpty)
-                          Row(
-                            children: [
-                              const Icon(Icons.map_outlined, size: 12, color: _kBlue),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text(
-                                  item.location!,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                                ),
-                              ),
-                            ],
+                        Text(
+                          amPmStr,
+                          style: TextStyle(
+                            fontFamily: 'Manrope',
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                            color: Colors.grey.shade600,
                           ),
+                        ),
                       ],
                     ),
                   ),
-                ),
-              ],
+                  // Divider
+                  VerticalDivider(
+                    color: Colors.grey.shade200,
+                    width: 1,
+                    thickness: 1,
+                  ),
+                  // Details Right Side
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          // Tags row
+                          Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: Colors.grey.shade300,
+                                  ),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  item.scheduleType.toUpperCase(),
+                                  style: TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.grey.shade600,
+                                    letterSpacing: 0.8,
+                                  ),
+                                ),
+                              ),
+
+                              const Spacer(),
+                              _buildStatusTag(item.status),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          // Title
+                          Text(
+                            item.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                              color: _kTextDark,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          // Location
+                          if (item.location != null &&
+                              item.location!.isNotEmpty)
+                            InkWell(
+                              onTap: () async {
+                                final url = Uri.parse(
+                                  'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(item.location!)}',
+                                );
+                                try {
+                                  await launchUrl(
+                                    url,
+                                    mode: LaunchMode.externalApplication,
+                                  );
+                                } catch (e) {
+                                  // ignore
+                                }
+                              },
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.map_outlined,
+                                    size: 12,
+                                    color: _kBlue,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                    child: Text(
+                                      item.location!,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: _kBlue,
+                                        decoration: TextDecoration.underline,
+                                        decorationColor: _kBlue,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
             const Divider(height: 1, thickness: 1),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1330,7 +1618,15 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     child: OutlinedButton.icon(
                       onPressed: () {
                         if (item.scheduleType.toLowerCase() == 'medication') {
-                          Navigator.push(context, MaterialPageRoute(builder: (_) => MedicationDashboardView(elderlyId: item.elderlyId, isStandalone: true)));
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => MedicationDashboardView(
+                                elderlyId: item.elderlyId,
+                                isStandalone: true,
+                              ),
+                            ),
+                          );
                         } else {
                           _navigateToAddEdit(existing: item);
                         }
@@ -1340,9 +1636,9 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                         size: 16,
                         color: _kBlue,
                       ),
-                      label: const Text(
-                        'Edit',
-                        style: TextStyle(
+                      label: Text(
+                        'Edit'.tr(),
+                        style: const TextStyle(
                           color: _kBlue,
                           fontWeight: FontWeight.bold,
                         ),
@@ -1365,9 +1661,9 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                         size: 16,
                         color: Colors.red,
                       ),
-                      label: const Text(
-                        'Delete',
-                        style: TextStyle(
+                      label: Text(
+                        'Delete'.tr(),
+                        style: const TextStyle(
                           color: Colors.red,
                           fontWeight: FontWeight.bold,
                         ),
@@ -1384,43 +1680,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                 ],
               ),
             ),
-            ],
-          ),
-        ),
-    );
-  }
-
-  Widget _buildPriorityTag(String priority) {
-    Color bg = Colors.grey.shade100;
-    Color txt = Colors.grey.shade600;
-    String label = 'Priority';
-
-    if (priority == 'high') {
-      bg = const Color(0xFFFFB7B5);
-      txt = const Color(0xFFF11000);
-      label = 'High Priority';
-    } else if (priority == 'medium') {
-      bg = const Color(0xFFFFC093);
-      txt = const Color(0xFF904F00);
-      label = 'Medium Priority';
-    } else if (priority == 'low') {
-      bg = const Color(0xFFFBFFAB);
-      txt = const Color(0xFF666E0C);
-      label = 'Low Priority';
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 9,
-          fontWeight: FontWeight.bold,
-          color: txt,
+          ],
         ),
       ),
     );
@@ -1439,7 +1699,7 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
         borderRadius: BorderRadius.circular(4),
       ),
       child: Text(
-        status.toUpperCase(),
+        status.toUpperCase().tr(),
         style: TextStyle(
           fontSize: 9,
           fontWeight: FontWeight.bold,
@@ -1458,7 +1718,9 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
         final endDf = DateFormat('h:mm a');
 
         return Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -1472,13 +1734,17 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                     Expanded(
                       child: Text(
                         item.title,
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: _kBlue),
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: _kBlue,
+                        ),
                       ),
                     ),
                     IconButton(
                       icon: const Icon(Icons.close),
                       onPressed: () => Navigator.pop(context),
-                    )
+                    ),
                   ],
                 ),
                 const Divider(),
@@ -1487,10 +1753,11 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                 // Schedule Type & Priority
                 Row(
                   children: [
-                    _buildPriorityTag(item.priority),
-                    const SizedBox(width: 8),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
                       decoration: BoxDecoration(
                         border: Border.all(color: Colors.grey.shade300),
                         borderRadius: BorderRadius.circular(6),
@@ -1509,18 +1776,33 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                 const SizedBox(height: 14),
 
                 // Time Details
-                const Text('Date & Time', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: _kTextGrey)),
+                Text(
+                  'Date & Time'.tr(),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                    color: _kTextGrey,
+                  ),
+                ),
                 const SizedBox(height: 4),
                 Row(
                   children: [
-                    const Icon(Icons.access_time_filled, size: 16, color: _kPrimary),
+                    const Icon(
+                      Icons.access_time_filled,
+                      size: 16,
+                      color: _kPrimary,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         item.allDay
                             ? '${DateFormat('EEEE, d MMMM yyyy').format(item.scheduleDateTime)} (All Day)'
                             : '${df.format(item.scheduleDateTime)}${item.endDateTime != null ? ' - ${endDf.format(item.endDateTime!)}' : ''}',
-                        style: const TextStyle(fontSize: 14, color: _kTextDark, fontWeight: FontWeight.w500),
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: _kTextDark,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
                   ],
@@ -1529,26 +1811,64 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
 
                 // Location Details
                 if (item.location != null && item.location!.isNotEmpty) ...[
-                  const Text('Location', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: _kTextGrey)),
+                  Text(
+                    'Location'.tr(),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: _kTextGrey,
+                    ),
+                  ),
                   const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      const Icon(Icons.location_on, size: 16, color: Colors.redAccent),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          item.location!,
-                          style: const TextStyle(fontSize: 14, color: _kTextDark),
+                  InkWell(
+                    onTap: () async {
+                      final url = Uri.parse(
+                        'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(item.location!)}',
+                      );
+                      try {
+                        await launchUrl(
+                          url,
+                          mode: LaunchMode.externalApplication,
+                        );
+                      } catch (e) {
+                        // ignore
+                      }
+                    },
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.location_on,
+                          size: 16,
+                          color: Colors.redAccent,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            item.location!,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: _kBlue,
+                              decoration: TextDecoration.underline,
+                              decorationColor: _kBlue,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 14),
                 ],
 
                 // Notes
                 if (item.cleanNotes.isNotEmpty) ...[
-                  const Text('Notes / Comment', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: _kTextGrey)),
+                  Text(
+                    'Notes / Comment'.tr(),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: _kTextGrey,
+                    ),
+                  ),
                   const SizedBox(height: 4),
                   Container(
                     width: double.infinity,
@@ -1567,7 +1887,8 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                 ],
 
                 // Reminder & Repeat
-                if (item.reminderTime != null || item.repeatFrequency != null) ...[
+                if (item.reminderTime != null ||
+                    item.repeatFrequency != null) ...[
                   Row(
                     children: [
                       if (item.reminderTime != null)
@@ -1575,9 +1896,19 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('Reminder Time', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: _kTextGrey)),
+                              Text(
+                                'Reminder Time'.tr(),
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  color: _kTextGrey,
+                                ),
+                              ),
                               const SizedBox(height: 2),
-                              Text(DateFormat('h:mm a').format(item.reminderTime!), style: const TextStyle(fontSize: 13)),
+                              Text(
+                                DateFormat('h:mm a').format(item.reminderTime!),
+                                style: const TextStyle(fontSize: 13),
+                              ),
                             ],
                           ),
                         ),
@@ -1586,9 +1917,19 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('Repeat', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: _kTextGrey)),
+                              Text(
+                                'Repeat'.tr(),
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  color: _kTextGrey,
+                                ),
+                              ),
                               const SizedBox(height: 2),
-                              Text(item.repeatFrequency!, style: const TextStyle(fontSize: 13)),
+                              Text(
+                                item.repeatFrequency!,
+                                style: const TextStyle(fontSize: 13),
+                              ),
                             ],
                           ),
                         ),
@@ -1599,7 +1940,14 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
 
                 // Photo Display
                 if (item.photoUrl != null && item.photoUrl!.isNotEmpty) ...[
-                  const Text('Attachment', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: _kTextGrey)),
+                  Text(
+                    'Attachment'.tr(),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: _kTextGrey,
+                    ),
+                  ),
                   const SizedBox(height: 6),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(8),
@@ -1613,7 +1961,10 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                           height: 100,
                           color: Colors.grey.shade100,
                           alignment: Alignment.center,
-                          child: const Icon(Icons.broken_image, color: Colors.grey),
+                          child: const Icon(
+                            Icons.broken_image,
+                            color: Colors.grey,
+                          ),
                         );
                       },
                     ),
@@ -1630,18 +1981,24 @@ class _ScheduleDashboardViewState extends State<ScheduleDashboardView> {
                         Navigator.pop(context);
                         _updateStatus(item, 'done');
                       },
-                      style: ElevatedButton.styleFrom(backgroundColor: _kPrimary, foregroundColor: Colors.white),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _kPrimary,
+                        foregroundColor: Colors.white,
+                      ),
                       icon: const Icon(Icons.check, size: 16),
-                      label: const Text('Mark Done'),
+                      label: Text('Mark Done'.tr()),
                     ),
                     OutlinedButton.icon(
                       onPressed: () {
                         Navigator.pop(context);
                         _updateStatus(item, 'skip');
                       },
-                      style: OutlinedButton.styleFrom(foregroundColor: Colors.red, side: const BorderSide(color: Colors.red)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.red,
+                        side: const BorderSide(color: Colors.red),
+                      ),
                       icon: const Icon(Icons.skip_next, size: 16),
-                      label: const Text('Skip'),
+                      label: Text('Skip'.tr()),
                     ),
                   ],
                 ),

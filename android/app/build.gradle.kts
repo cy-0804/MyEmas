@@ -10,7 +10,7 @@ plugins {
 
 android {
     namespace = "com.example.my_emas"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
