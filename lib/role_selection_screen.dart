@@ -21,10 +21,31 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
       final user = Supabase.instance.client.auth.currentUser;
       if (user == null) throw Exception('No authenticated user found');
       
-      await Supabase.instance.client
+      final existingUser = await Supabase.instance.client
           .from('users')
-          .update({'role_id': role})
-          .eq('user_id', user.id);
+          .select('user_id')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+      if (existingUser == null) {
+        final insertData = {'user_id': user.id, 'role_id': role};
+        if (user.email != null) insertData['email'] = user.email!;
+        try {
+          await Supabase.instance.client.from('users').insert(insertData);
+        } catch (e) {
+          if (e.toString().contains('users_email_key')) {
+            insertData.remove('email');
+            await Supabase.instance.client.from('users').insert(insertData);
+          } else {
+            rethrow;
+          }
+        }
+      } else {
+        await Supabase.instance.client
+            .from('users')
+            .update({'role_id': role})
+            .eq('user_id', user.id);
+      }
 
       if (mounted) {
         if (role == 'caregiver') {
@@ -166,7 +187,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
       ),
       body: SafeArea(
         child: _isLoading
-            ? Center(child: CircularProgressIndicator(color: Color(0xFF51A77B)))
+            ? const Center(child: CircularProgressIndicator(color: Color(0xFF51A77B)))
             : SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
                 child: Column(
@@ -174,7 +195,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                     const SizedBox(height: 8),
                     Text(
                       'Select Your Role'.tr(),
-                      style: TextStyle(
+                      style: const TextStyle(
                         fontSize: 32,
                         fontWeight: FontWeight.w900,
                         color: Color(0xFF27252E),
@@ -186,8 +207,8 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                       title: 'Elderly'.tr(),
                       description: 'Simple interface, voice commands, and health tracking tools.',
                       titleColor: const Color(0xFF3F8863),
-                      image1: 'senior.png',
-                      image2: 'senior (1).png',
+                      image1: 'assets/senior.png',
+                      image2: 'assets/senior (1).png',
                       onTap: () => _selectRole('elderly'),
                     ),
                     const SizedBox(height: 30),
@@ -195,8 +216,8 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                       title: 'Caregiver'.tr(),
                       description: 'Remote monitoring, alert management, and caregiver support.',
                       titleColor: const Color(0xFF00539E),
-                      image1: 'caregiver.png',
-                      image2: 'caregiver (1).png',
+                      image1: 'assets/caregiver.png',
+                      image2: 'assets/caregiver (1).png',
                       onTap: () => _selectRole('caregiver'),
                     ),
                     const SizedBox(height: 40),

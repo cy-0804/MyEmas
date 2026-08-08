@@ -15,6 +15,8 @@ import 'dart:io';
 import 'package:image_picker/image_picker.dart';
 import 'schedule_dashboard_view.dart';
 import 'notification_dialogs.dart';
+import 'medication_reminder/models/medication_dose.dart';
+import 'medication_reminder/services/reminder_scheduler.dart';
 
 // ─── colour tokens (matching app design system) ───────────────────────────────
 const _kPrimary = Color(0xFF51A77B);
@@ -198,10 +200,14 @@ String _formatWhenToTake(String? val, [BuildContext? context]) {
 final Map<String, Timer> _followUpTimers = {};
 // Track pending first-alert futures keyed by medication id (cancel via flag)
 final Map<String, bool> _cancelledAlerts = {};
+// Track initial and snooze timers
+final Map<String, Timer> _initialTimers = {};
 
 /// Cancel all scheduled reminders for one medication (call on delete or mark-taken).
 void cancelMedicationReminder(String medId) {
   _cancelledAlerts[medId] = true;
+  _initialTimers[medId]?.cancel();
+  _initialTimers.remove(medId);
   _followUpTimers[medId]?.cancel();
   _followUpTimers.remove(medId);
   debugPrint('cancelMedicationReminder: cancelled reminders for $medId');
@@ -212,6 +218,10 @@ void cancelAllMedicationReminders() {
   for (final id in _cancelledAlerts.keys) {
     _cancelledAlerts[id] = true;
   }
+  for (final t in _initialTimers.values) {
+    t.cancel();
+  }
+  _initialTimers.clear();
   for (final t in _followUpTimers.values) {
     t.cancel();
   }
@@ -250,8 +260,7 @@ void cancelAllMedicationReminders() {
   return null;
 }
 
-/// Schedules a reminder for one medication using pure Dart timers.
-/// If the reminder time has already passed today, immediately starts follow-up loop.
+/// Schedules a reminder for one medication using the FSM engine.
 void scheduleMedicationReminder(Medication med) {
   final parsed = _parseReminderTime(med.whenToTake);
   if (parsed == null) return;
@@ -260,55 +269,28 @@ void scheduleMedicationReminder(Medication med) {
   final now = DateTime.now();
   final reminderToday = DateTime(now.year, now.month, now.day, hour, minute);
 
-  final medId = med.id;
-  final payload =
-      '$medId|${med.name}|${med.dosage ?? ""}|${med.instruction ?? "as directed"}';
-
-  // Mark as not cancelled
-  _cancelledAlerts[medId] = false;
-
-  if (reminderToday.isAfter(now)) {
-    // Reminder time is in the future — use Future.delayed for first alert
-    final delay = reminderToday.difference(now);
-    debugPrint(
-      'scheduleMedicationReminder: ${med.name} fires in ${delay.inMinutes}m ${delay.inSeconds % 60}s',
-    );
-
-    Future.delayed(delay, () async {
-      if (_cancelledAlerts[medId] == true) return;
-
-      debugPrint(
-        'scheduleMedicationReminder: firing initial alert for ${med.name}',
-      );
-      await _triggerNotificationAndOverlay(
-        medId.hashCode,
-        '💊 Time to take ${med.name}!',
-        '${med.dosage ?? ""} — ${med.instruction ?? "as directed"}',
-        payload,
-      );
-      _startFollowUpTimer(
-        medId,
-        med.name,
-        med.dosage,
-        med.instruction,
-        payload,
-      );
-    });
-  } else {
-    // Reminder time already passed today — if no follow-up timer is running, start one
-    debugPrint(
-      'scheduleMedicationReminder: ${med.name} reminder already passed today — starting follow-up immediately',
-    );
-    if (!_followUpTimers.containsKey(medId)) {
-      _startFollowUpTimer(
-        medId,
-        med.name,
-        med.dosage,
-        med.instruction,
-        payload,
-      );
-    }
+  if (now.isAfter(reminderToday.add(const Duration(hours: 4)))) {
+    // Already completely missed the window for today.
+    return;
   }
+
+  final dose = MedicationDose(
+    id: '${med.id}_${reminderToday.millisecondsSinceEpoch}',
+    medicationId: med.id,
+    name: med.name,
+    dosage: med.dosage,
+    instruction: med.instruction,
+    photo: med.photo,
+    scheduledTime: reminderToday,
+    windowEnd: reminderToday.add(const Duration(hours: 4)), // default 4-hour window
+  );
+
+  // Mark in local maps so syncAll doesn't try to constantly restart
+  _initialTimers[med.id]?.cancel();
+  _cancelledAlerts[med.id] = false;
+
+  ReminderScheduler.instance.scheduleDose(dose);
+  debugPrint('FSM: Scheduled real dose for ${med.name} at $reminderToday');
 }
 
 /// Starts a recursive chain of one-shot follow-up timers.
@@ -700,14 +682,15 @@ void showMedicationReminderDialog(
                       child: OutlinedButton(
                         onPressed: () async {
                           Navigator.pop(context);
-                          // Pause follow-up loop, then snooze 5 min via Future.delayed
+                          // Pause follow-up loop, then snooze 5 min via Timer
                           cancelMedicationReminder(medId);
+                          _cancelledAlerts[medId] = false;
                           debugPrint(
                             'Remind Later: snoozed $name for 5 minutes',
                           );
-                          Future.delayed(const Duration(minutes: 5), () async {
-                            // Re-mark as not cancelled so follow-ups can run again
-                            _cancelledAlerts[medId] = false;
+                          _initialTimers[medId] = Timer(const Duration(minutes: 5), () async {
+                            _initialTimers.remove(medId);
+                            if (_cancelledAlerts[medId] == true) return;
                             // Show the snooze notification
                             await _triggerNotificationAndOverlay(
                               medId.hashCode,
@@ -781,6 +764,7 @@ class Medication {
   final DateTime? expirationDate;
   final String? photo;
   final String? stockUnit;
+  final int minIntervalHours;
 
   Medication({
     required this.id,
@@ -794,6 +778,7 @@ class Medication {
     this.expirationDate,
     this.photo,
     this.stockUnit,
+    this.minIntervalHours = 4,
   });
 
   factory Medication.fromMap(Map<String, dynamic> m) {
@@ -821,6 +806,9 @@ class Medication {
           : null,
       photo: m['photo']?.toString(),
       stockUnit: sUnit,
+      minIntervalHours: m['min_interval_hours'] != null
+          ? int.tryParse(m['min_interval_hours'].toString()) ?? 4
+          : 4,
     );
   }
 }
@@ -2553,6 +2541,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
   final _dosageCtrl = TextEditingController();
   final _stockCtrl = TextEditingController();
   final _notesCtrl = TextEditingController();
+  final _minIntervalCtrl = TextEditingController(text: '4');
   String? _unit = 'tablet(s)';
   String? _stockUnit = 'tablet(s)';
   String? _whenToTake;
@@ -2619,6 +2608,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
       }
       _stockCtrl.text = e.stock?.toString() ?? '';
       _notesCtrl.text = e.notes ?? '';
+      _minIntervalCtrl.text = e.minIntervalHours.toString();
       _whenToTake = e.whenToTake;
       _instruction = e.instruction;
       _expirationDate = e.expirationDate;
@@ -2658,6 +2648,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
     _dosageCtrl.dispose();
     _stockCtrl.dispose();
     _notesCtrl.dispose();
+    _minIntervalCtrl.dispose();
     super.dispose();
   }
 
@@ -2857,6 +2848,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
           : _selectedWhenToTakes.toList();
 
       bool isFirstUpdate = true;
+      int minInterval = int.tryParse(_minIntervalCtrl.text.trim()) ?? 4;
       for (String timeToTake in timesToSave) {
         String? whenToTakeValue = timeToTake;
         TimeOfDay? currentReminderTime = _reminderTime;
@@ -2977,6 +2969,7 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
                 .split('T')
                 .first,
           'schedule_id': scheduleId,
+          'min_interval_hours': minInterval,
         };
 
         if (_selectedImage != null) {
@@ -3315,6 +3308,14 @@ class _AddEditMedicineScreenState extends State<AddEditMedicineScreen> {
               _instructions,
               _instruction,
               (v) => setState(() => _instruction = v),
+            ),
+            SizedBox(height: 16),
+
+            _label('Minimum Interval Between Doses (Hours)'),
+            TextField(
+              controller: _minIntervalCtrl,
+              keyboardType: TextInputType.number,
+              decoration: _inputDeco('e.g. 4'),
             ),
             SizedBox(height: 16),
 

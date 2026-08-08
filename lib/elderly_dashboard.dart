@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'medication_missed_checker.dart';
 import 'health_dashboard_view.dart';
 import 'medication_dashboard_view.dart';
@@ -12,6 +14,11 @@ import 'sos_active_screen.dart';
 import 'elderly_settings_screen.dart';
 import 'sos_notification_service.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+import 'medication_reminder/repositories/medication_repository.dart';
+import 'medication_reminder/services/notification_service.dart';
+import 'medication_reminder/services/reminder_scheduler.dart';
+import 'medication_reminder/ui/reminder_dialog.dart';
 
 const _kPrimary = Color(0xFF51A77B);
 const _kBlue = Color(0xFF00539E);
@@ -34,6 +41,8 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
   static const int _sosDurationMs = 3000;
   Timer? _periodicTimer;
   DateTime? _lastPromptTime;
+  
+  final Set<String> _activeDialogs = {};
 
   @override
   void initState() {
@@ -47,10 +56,28 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
       }
       await _checkHealthReminder();
     });
+
+    final repo = MedicationDoseRepository();
+    final notifService = ReminderNotificationService();
+    notifService.init(
+      onNotificationTap: (_) {
+        ReminderScheduler.instance.evaluateFsmNow();
+      }
+    );
+    ReminderScheduler.instance.init(repo, notifService);
+    ReminderScheduler.instance.activeReminders.listen((dose) {
+      if (!_activeDialogs.contains(dose.id)) {
+        _activeDialogs.add(dose.id);
+        FsmReminderDialog.show(context, dose, ReminderScheduler.instance).then((_) {
+          _activeDialogs.remove(dose.id);
+        });
+      }
+    });
   }
 
   @override
   void dispose() {
+    ReminderScheduler.instance.dispose();
     _periodicTimer?.cancel();
     super.dispose();
   }
@@ -58,6 +85,16 @@ class _ElderlyDashboardState extends State<ElderlyDashboard> {
   Future<void> _requestCriticalPermissions() async {
     // Request all critical permissions for SOS upfront so the app doesn't crash or block during an emergency.
     await [Permission.phone, Permission.sms, Permission.location].request();
+    
+    // Request overlay permission for background medication dialogs
+    try {
+       bool hasOverlay = await FlutterOverlayWindow.isPermissionGranted();
+       if (!hasOverlay) {
+         await FlutterOverlayWindow.requestPermission();
+       }
+    } catch (e) {
+       debugPrint('Overlay permission error: $e');
+    }
   }
 
   Future<void> _checkHealthReminder() async {

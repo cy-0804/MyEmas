@@ -360,15 +360,13 @@ class _LoginScreenState extends State<LoginScreen> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
-                              'Next'.tr(),
+                              'Login'.tr(),
                               style: const TextStyle(
                                 fontSize: 17,
                                 color: Colors.white,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.arrow_forward, color: Colors.white, size: 18),
                           ],
                         ),
                 ),

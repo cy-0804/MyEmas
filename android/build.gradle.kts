@@ -38,6 +38,16 @@ subprojects {
             } catch (e: Exception) {
                 // ignore if not applicable
             }
+
+            // Force all Android modules to use at least minSdk 21
+            try {
+                val getDefaultConfigMethod = androidExt.javaClass.getMethod("getDefaultConfig")
+                val defaultConfig = getDefaultConfigMethod.invoke(androidExt)
+                val setMinSdkMethod = defaultConfig.javaClass.getMethod("setMinSdkVersion", Integer::class.java)
+                setMinSdkMethod.invoke(defaultConfig, 21)
+            } catch (e: Exception) {
+                // ignore if not applicable
+            }
         }
     }
 }

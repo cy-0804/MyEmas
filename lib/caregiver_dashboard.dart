@@ -10,6 +10,7 @@ import 'caregiver_elderly_detail_screen.dart';
 import 'sos_notification_service.dart';
 import 'location_search_field.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // ─── colour tokens ────────────────────────────────────────────────────────────
 const _kBlue = Color(0xFF00539E);
@@ -1231,12 +1232,24 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
   Map<String, List<Map<String, dynamic>>> _medsByElderly = {};
   // elderlyId -> list of today's log maps
   Map<String, List<Map<String, dynamic>>> _logsByElderly = {};
+  
+  // list of active medication alerts
+  List<Map<String, dynamic>> _activeAlerts = [];
+  
   bool _loading = false;
+  RealtimeChannel? _alertChannel;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _subscribeAlerts();
+  }
+  
+  @override
+  void dispose() {
+    _alertChannel?.unsubscribe();
+    super.dispose();
   }
 
   @override
@@ -1250,8 +1263,20 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
     setState(() => _loading = true);
     try {
       final db = Supabase.instance.client;
+      final uid = db.auth.currentUser?.id;
+      if (uid == null) return;
+      
       final Map<String, List<Map<String, dynamic>>> medsMap = {};
       final Map<String, List<Map<String, dynamic>>> logsMap = {};
+      
+      // Fetch Alerts
+      final alertRes = await db
+          .from('medication_alerts')
+          .select()
+          .eq('caregiver_id', uid)
+          .neq('status', 'Resolved')
+          .order('created_at', ascending: false);
+      final fetchedAlerts = (alertRes as List).cast<Map<String, dynamic>>();
 
       for (final el in widget.linked) {
         // Get schedule IDs for this elderly
@@ -1306,6 +1331,7 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
         setState(() {
           _medsByElderly = medsMap;
           _logsByElderly = logsMap;
+          _activeAlerts = fetchedAlerts;
           _loading = false;
         });
       }
@@ -1321,6 +1347,18 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
         );
       }
     }
+  }
+
+  void _subscribeAlerts() {
+    final db = Supabase.instance.client;
+    _alertChannel = db.channel('medication_alerts_changes').onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'medication_alerts',
+      callback: (payload) {
+        _load(); // Reload alerts when changed
+      },
+    ).subscribe();
   }
 
   @override
@@ -1352,7 +1390,37 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
               sliver: SliverList(
                 delegate: SliverChildBuilderDelegate((ctx, i) {
-                  final el = widget.linked[i];
+                  // +1 to accommodate ActiveAlertsSection if not empty
+                  if (_activeAlerts.isNotEmpty && i == 0) {
+                    return _ActiveAlertsSection(
+                      alerts: _activeAlerts,
+                      linked: widget.linked,
+                      onAcknowledge: (alertId) async {
+                        try {
+                           await Supabase.instance.client.from('medication_alerts').update({
+                             'status': 'Acknowledged',
+                             'acknowledged_at': DateTime.now().toUtc().toIso8601String(),
+                           }).eq('alert_id', alertId);
+                           _load();
+                        } catch(e) {
+                           debugPrint('Error acknowledging: $e');
+                        }
+                      },
+                      onMarkAssisted: (alertId) async {
+                        try {
+                           await Supabase.instance.client.from('medication_alerts').update({
+                             'status': 'Resolved'
+                           }).eq('alert_id', alertId);
+                           _load();
+                        } catch(e) {
+                           debugPrint('Error resolving: $e');
+                        }
+                      }
+                    );
+                  }
+                  
+                  final actualIndex = _activeAlerts.isNotEmpty ? i - 1 : i;
+                  final el = widget.linked[actualIndex];
                   final meds = _medsByElderly[el.elderlyId] ?? [];
                   final logs = _logsByElderly[el.elderlyId] ?? [];
                   return _ElderlyMedSection(
@@ -1360,11 +1428,161 @@ class _MedMonitorPageState extends State<_MedMonitorPage> {
                     medications: meds,
                     todayLogs: logs,
                   );
-                }, childCount: widget.linked.length),
+                }, childCount: widget.linked.length + (_activeAlerts.isNotEmpty ? 1 : 0)),
               ),
             ),
         ],
       ),
+    );
+  }
+}
+
+class _ActiveAlertsSection extends StatelessWidget {
+  final List<Map<String, dynamic>> alerts;
+  final List<LinkedElderly> linked;
+  final Function(String alertId) onAcknowledge;
+  final Function(String alertId) onMarkAssisted;
+
+  const _ActiveAlertsSection({
+    required this.alerts,
+    required this.linked,
+    required this.onAcknowledge,
+    required this.onMarkAssisted,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.red.shade700),
+            const SizedBox(width: 8),
+            Text(
+              'Active Alerts',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.red.shade900,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ...alerts.map((alert) {
+          final alertId = alert['alert_id'];
+          final elderlyId = alert['elderly_id'];
+          final elderly = linked.firstWhere((e) => e.elderlyId == elderlyId, orElse: () => LinkedElderly(elderlyId: '', name: 'Unknown'));
+          
+          final medName = alert['medication_name'] ?? 'Unknown Medication';
+          final missedTimeStr = alert['missed_time'] as String?;
+          final missedTime = missedTimeStr != null ? DateTime.tryParse(missedTimeStr)?.toLocal() : null;
+          final timeFormatted = missedTime != null ? DateFormat('h:mm a').format(missedTime) : '--:--';
+          
+          final status = alert['status'] as String? ?? 'Pending';
+          final isPending = status == 'Pending';
+          final consecutiveMissed = (alert['consecutive_missed_count'] as int?) ?? 1;
+          
+          return Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: consecutiveMissed >= 4 ? Colors.red.shade50 : Colors.orange.shade50,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: consecutiveMissed >= 4 ? Colors.red.shade200 : Colors.orange.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Medication Missed',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: consecutiveMissed >= 4 ? Colors.red.shade700 : Colors.orange.shade800,
+                      ),
+                    ),
+                    if (consecutiveMissed >= 4)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade100,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Repeated Non-Adherence',
+                          style: TextStyle(color: Colors.red.shade900, fontSize: 10, fontWeight: FontWeight.bold),
+                        ),
+                      )
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  elderly.name,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                ),
+                const SizedBox(height: 4),
+                Text('Medicine: $medName'),
+                Text('Missed At: $timeFormatted'),
+                Text('Status: $status', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    if (isPending)
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: () => onAcknowledge(alertId),
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.orange.shade600, foregroundColor: Colors.white),
+                          child: const Text('Acknowledge'),
+                        ),
+                      ),
+                    if (isPending) const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => onMarkAssisted(alertId),
+                        style: OutlinedButton.styleFrom(foregroundColor: Colors.green.shade700, side: BorderSide(color: Colors.green.shade700)),
+                        child: const Text('Mark Assisted'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextButton.icon(
+                          onPressed: () {
+                            if (elderly.phone != null) {
+                               launchUrl(Uri.parse('tel:${elderly.phone}'));
+                            }
+                          },
+                          icon: const Icon(Icons.phone),
+                          label: const Text('Call Elderly'),
+                        ),
+                      ),
+                      Expanded(
+                        child: TextButton.icon(
+                          onPressed: () {
+                             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reminder sent to patient\'s device.')));
+                          },
+                          icon: const Icon(Icons.notifications_active),
+                          label: const Text('Send Reminder'),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              ],
+            ),
+          );
+        }),
+      ],
     );
   }
 }

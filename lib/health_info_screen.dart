@@ -147,18 +147,28 @@ class _HealthInfoScreenState extends State<HealthInfoScreen> {
 
       // ── Step 2: Create users row if missing ──────────────────────────────
       if (existingUser == null) {
+        final insertData = <String, dynamic>{'user_id': targetId};
+        if (targetId == user.id && user.email != null) insertData['email'] = user.email;
+        if (targetId == user.id && user.phone != null && user.phone!.isNotEmpty) {
+          insertData['phone_num'] = user.phone;
+        }
+        insertData['role_id'] = 'elderly';
         try {
-          final insertData = <String, dynamic>{'user_id': targetId};
-          if (targetId == user.id && user.email != null) insertData['email'] = user.email;
-          if (targetId == user.id && user.phone != null && user.phone!.isNotEmpty) {
-            insertData['phone_num'] = user.phone;
-          }
-          insertData['role_id'] = 'elderly';
           debugPrint('DEBUG: inserting into users: $insertData');
           await Supabase.instance.client.from('users').insert(insertData);
           debugPrint('DEBUG: users insert OK');
         } catch (e) {
-          throw Exception('[Step 2 - Insert users] $e');
+          if (e.toString().contains('users_email_key')) {
+            debugPrint('DEBUG: email already exists (dangling row), inserting without email');
+            insertData.remove('email');
+            try {
+              await Supabase.instance.client.from('users').insert(insertData);
+            } catch (e2) {
+              throw Exception('[Step 2 - Insert users fallback] $e2');
+            }
+          } else {
+            throw Exception('[Step 2 - Insert users] $e');
+          }
         }
       } else if (existingUser['role_id'] == null) {
         try {
